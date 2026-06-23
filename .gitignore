@@ -1,0 +1,11 @@
+# Local tooling
+.nvm/
+.node/
+node_modules/
+
+# Archives and logs
+docs.zip
+void-install.log
+
+# OS
+.DS_Store

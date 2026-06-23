@@ -1,0 +1,5 @@
+export { clusterFiles } from './clustering.js'
+export { inferEdges } from './edge-inference.js'
+export { analyzeProject } from './builder.js'
+export { renderTopologyMarkdown } from './topology-render.js'
+export { enrichTopology, computeTopologyMeta } from './topology-hierarchy.js'
