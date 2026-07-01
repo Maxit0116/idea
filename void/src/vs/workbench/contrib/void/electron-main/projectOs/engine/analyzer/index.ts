@@ -1,3 +1,6 @@
 export { scanFiles, readPackageJson, type ScannedFile } from './file-scanner.js'
 export { detectRoutes } from './route-detector.js'
 export { parseImports, extractExports } from './import-parser.js'
+export { detectProjectType } from './project-type-detector.js'
+export { discoverEntries, type EntryPoint, type EntryDiscoveryResult } from './entry-discovery.js'
+export { discoverVoidEntries } from './void-entry-discovery.js'

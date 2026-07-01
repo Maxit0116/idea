@@ -622,6 +622,7 @@ export const chat_userMessageContent = async (
 	opts: {
 		directoryStrService: IDirectoryStrService,
 		fileService: IFileService
+		functionMapContext?: string | null,
 	},
 ) => {
 
@@ -640,6 +641,10 @@ export const chat_userMessageContent = async (
 
 	const selnsStr = selnsStrs.join('\n\n') ?? ''
 	if (selnsStr) str += `\n---\nSELECTIONS\n${selnsStr}`
+
+	if (opts.functionMapContext?.trim()) {
+		str += `\n---\nFUNCTION MAP CONTEXT\n${opts.functionMapContext.trim()}`
+	}
 	return str;
 }
 

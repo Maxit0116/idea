@@ -5,13 +5,31 @@
 
 import { Event } from '../../../../base/common/event.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
+import type { ChatMode, ModelSelection, ModelSelectionOptions, OverridesOfModel, SettingsOfProvider } from './voidSettingsTypes.js';
 
 // ═══ Graph Schema (Demo: R-D01) ══════════════════════════════════
 // Inspired by Stello's session topology — nodes form a hierarchical
 // graph with parent/child nesting and cross-references.
 
+export type GraphVersion = '0.2.0' | '0.3.0'
+
+const STALE_NODE_ID_PATTERN = /^(mod_|static_|contrib_)/
+
+/** True when cached graph is directory-mirror era (v0.2.0 or majority mod_/static_/contrib_ ids). */
+export function isStaleFunctionMapGraph(graph: Pick<ProjectGraph, 'version' | 'nodes'>): boolean {
+  if (graph.version < '0.3.0') {
+    return true
+  }
+  const featureNodes = graph.nodes.filter(n => n.id !== 'sys_root')
+  if (featureNodes.length === 0) {
+    return false
+  }
+  const staleCount = featureNodes.filter(n => STALE_NODE_ID_PATTERN.test(n.id)).length
+  return staleCount / featureNodes.length > 0.5
+}
+
 export interface ProjectGraph {
-  version: '0.2.0'
+  version: GraphVersion
   projectId: string
   projectName: string
   projectType: ProjectType
@@ -22,6 +40,12 @@ export interface ProjectGraph {
   nodes: FunctionalNode[]
   edges: FunctionalEdge[]
   fileIndex: FileEntry[]
+  /** Technical dependency graph (AI-only, not rendered on Function Map) */
+  internalArchitecture?: {
+    importEdges: FunctionalEdge[]
+    analyzedAt: string
+  }
+  analysisMeta?: AnalysisMeta
 }
 
 export interface TopologyMeta {
@@ -30,8 +54,37 @@ export interface TopologyMeta {
   totalNodes: number
 }
 
-export type ProjectType = 'nextjs-app' | 'nextjs-pages'
+export type ProjectType = 'nextjs-app' | 'nextjs-pages' | 'react-spa' | 'vscode-fork' | 'monorepo' | 'generic'
 export type AnalysisStatus = 'complete' | 'partial' | 'error'
+
+export type AnalysisProfile = 'quick' | 'standard' | 'deep'
+
+export type TokenBudget = number | 'unlimited'
+
+export type CrossBranchEdgeMode = 'always' | 'on-select' | 'never'
+
+export type ArchitectureGuardMode = 'off' | 'warn' | 'block'
+
+export type NodeGranularity = 'project' | 'module' | 'feature' | 'subfeature' | 'unit'
+
+export type AnchorSymbolKind = 'function' | 'class' | 'component' | 'hook' | 'module' | 'block'
+
+export interface CodeAnchor {
+  path: string
+  startLine: number
+  endLine: number
+  symbolName?: string
+  symbolKind?: AnchorSymbolKind
+  role: FileRole
+  summary?: string
+}
+
+export interface NodeLineage {
+  slug: string
+  aliases: string[]
+  createdBy: 'static' | 'ai' | 'user'
+  createdAt: string
+}
 
 export interface FunctionalNode {
   id: string
@@ -48,6 +101,11 @@ export interface FunctionalNode {
   depth: number
   // Content
   linkedFiles: LinkedFile[]
+  anchors?: CodeAnchor[]
+  granularity?: NodeGranularity
+  lineage?: NodeLineage
+  crossRefs?: string[]
+  sourceClusterIds?: string[]
   upstream: string[]
   downstream: string[]
   preview: NodePreview | null
@@ -64,7 +122,7 @@ export interface LinkedFile {
   summary?: string
 }
 
-export type FileRole = 'primary' | 'supporting' | 'config' | 'test'
+export type FileRole = 'primary' | 'core' | 'api' | 'supporting' | 'config' | 'test'
 
 export interface NodePreview {
   route: string | null
@@ -126,7 +184,75 @@ export interface AnalysisProgress {
 
 export type AnalysisStage =
   | 'file_scan' | 'route_detection' | 'import_analysis'
-  | 'clustering' | 'edge_inference' | 'finalize'
+  | 'clustering' | 'edge_inference' | 'llm_enrichment'
+  | 'entry_discovery' | 'ai_pass1' | 'ai_pass2'
+  | 'ai_function_tree' | 'anchor_validation' | 'graph_merge' | 'finalize'
+
+export interface AnalysisMeta {
+  profile: AnalysisProfile
+  pipeline: 'static' | 'entry_driven' | 'ai_pass1' | 'ai_pass2'
+  entryCount: number
+}
+
+export interface AnalysisOptions {
+  profile: AnalysisProfile
+  tokenBudget: TokenBudget
+  lazyRefinement: boolean
+  maxUnitNodesPerFeature?: number
+}
+
+export const DEFAULT_ANALYSIS_OPTIONS: AnalysisOptions = {
+  profile: 'standard',
+  tokenBudget: 'unlimited',
+	lazyRefinement: false,
+  maxUnitNodesPerFeature: 20,
+}
+
+export interface GraphChangelogEntry {
+  at: string
+  fromId?: string
+  toId: string
+  reason: 'reanalyze' | 'user_edit' | 'ai_refine' | 'merge' | 'split'
+  note?: string
+}
+
+export type GraphEditType = 'rename' | 'merge' | 'delete' | 'reparent' | 'update_anchors'
+
+export interface GraphEdit {
+  type: GraphEditType
+  nodeId: string
+  targetNodeId?: string
+  newParentId?: string
+  name?: string
+  nameEn?: string
+  anchors?: CodeAnchor[]
+}
+
+export type GuardSeverity = 'ok' | 'warning' | 'critical'
+
+export interface GuardAlternative {
+  label: string
+  description: string
+  patch: GraphEdit
+}
+
+export interface ValidateEditResponse {
+  allowed: boolean
+  severity: GuardSeverity
+  impacts: string[]
+  alternatives: GuardAlternative[]
+}
+
+export interface RefineNodeResponse {
+  suggestions: GuardAlternative[]
+}
+
+export interface ApplyGraphEditResponse {
+  success: boolean
+  graph?: GraphResponse
+  validation?: ValidateEditResponse
+  error?: string
+}
 
 export interface JobStatus {
   jobId: string
@@ -147,6 +273,8 @@ export interface NodeContext {
   fileSummaries: FileSummary[]
   upstream: { id: string; name: string; summary: string }[]
   downstream: { id: string; name: string; summary: string }[]
+  routes: string[]
+  apis: string[]
   recentChanges: RecentChange[]
 }
 
@@ -167,8 +295,9 @@ export interface ProjectContext {
   projectName: string
   projectType: ProjectType
   nodeCount: number
-  topNodes: { id: string; name: string }[]
+  topNodes: { id: string; name: string; summary: string }[]
   recentActivity: RecentChange[]
+  topologySummary: string
 }
 
 // ═══ Prompt Understanding (M2: R-M201) ═══════════════════════════
@@ -368,7 +497,10 @@ export interface GraphResponse {
   projectId: string
   projectName: string
   projectType: ProjectType
+  version?: GraphVersion
   analysisStatus: AnalysisStatus
+  analysisError?: string | null
+  analysisMeta?: AnalysisMeta
   projectPath: string
   nodes: FunctionalNode[]
   edges: FunctionalEdge[]
@@ -382,10 +514,72 @@ export interface NodeDetailResponse {
   description: string
   summary: string
   files: LinkedFile[]
+  anchors?: CodeAnchor[]
+  granularity?: NodeGranularity
+  lineage?: NodeLineage
+  crossRefs?: string[]
   upstream: { id: string; name: string }[]
   downstream: { id: string; name: string }[]
   preview: NodePreview | null
   tags: string[]
+  routes: string[]
+  apis: string[]
+}
+
+export interface ProjectDetailResponse {
+  projectId: string
+  projectName: string
+  projectType: ProjectType
+  moduleCount: number
+  topModules: { id: string; name: string; fileCount: number }[]
+  topologySummary: string
+  analysisMeta?: AnalysisMeta
+  analysisStatus?: AnalysisStatus
+  analysisError?: string | null
+  graphVersion?: GraphVersion
+}
+
+/** Registry key for project-level chat thread (sys_root) */
+export const PROJECT_NODE_KEY = '__project__'
+
+/** Binds a Void chat thread to a Function Map node or project root */
+export interface FunctionMapThreadBinding {
+  projectId: string
+  nodeKey: string
+  level: 'node' | 'project'
+  label: string
+  nodeId: string | null
+}
+
+/** Formal buildContext response (R-M103) */
+export interface BuildContextResponse {
+  level: 'node' | 'project'
+  context: NodeContext | ProjectContext
+  markdown: string
+  primaryFilePaths: string[]
+}
+
+export interface SelectNodeContextResponse {
+  detail: NodeDetailResponse | null
+  pack: BuildContextResponse | null
+  projectDetail?: ProjectDetailResponse | null
+}
+
+export interface SubmitPromptResponse {
+  stub: true
+  nodeId: string
+  accepted: boolean
+  message: string
+}
+
+/** Injected into AI Chat when a Function Map node or project root is selected */
+export interface ProjectOsChatContext {
+  level: 'project' | 'node'
+  label: string
+  nodeId: string | null
+  markdown: string
+  primaryFilePaths: string[]
+  summary?: string
 }
 
 export interface AnalyzeResult {
@@ -428,6 +622,14 @@ export const IPC = {
   REPORT_ERROR: 'engine:reportError',
   BUILD_DEBUG_CONTEXT: 'engine:buildDebugContext',
   FIX_BUG: 'engine:fixBug',
+  // Function Map v0.3
+  EXPAND_NODE_ANALYSIS: 'engine:expandNodeAnalysis',
+  REFINE_NODE: 'engine:refineNode',
+  VALIDATE_EDIT: 'engine:validateEdit',
+  GET_CHANGELOG: 'engine:getChangelog',
+  EXPORT_CHANGELOG: 'engine:exportChangelog',
+  APPLY_GRAPH_EDIT: 'engine:applyGraphEdit',
+  RESOLVE_NODE_ID: 'engine:resolveNodeId',
 } as const
 
 // ═══ Project OS Service (Void integration) ═══════════════════════
@@ -440,20 +642,63 @@ export type ProjectOsAnalysisState =
 
 export interface ProjectOsSelection {
 	nodeId: string | null
+	level: 'none' | 'project' | 'node'
 	detail: NodeDetailResponse | null
+	projectDetail: ProjectDetailResponse | null
+}
+
+export interface ProjectOsAnalyzeLlmConfig {
+	modelSelection: ModelSelection
+	settingsOfProvider: SettingsOfProvider
+	modelSelectionOptions: ModelSelectionOptions | undefined
+	overridesOfModel: OverridesOfModel
+	chatMode: ChatMode
+}
+
+export interface ProjectOsAnalyzeRequest {
+	projectPath: string
+	jobId: string
+	llm?: ProjectOsAnalyzeLlmConfig
+	options?: AnalysisOptions
 }
 
 export interface IProjectOsService {
   readonly _serviceBrand: undefined
   readonly state: ProjectOsAnalysisState
   readonly selection: ProjectOsSelection
+  readonly chatContext: ProjectOsChatContext | null
+  readonly expandedNodeIds: ReadonlySet<string>
+  readonly focusNodeId: string | null
   readonly onDidChangeState: Event<ProjectOsAnalysisState>
   readonly onDidChangeSelection: Event<ProjectOsSelection>
-  analyze(projectPath: string): Promise<void>
+  readonly onDidChangeChatContext: Event<ProjectOsChatContext | null>
+  readonly onDidChangeExpandedNodes: Event<ReadonlySet<string>>
+  readonly onDidChangeFocusNode: Event<string | null>
+  analyze(projectPath: string, options?: AnalysisOptions): Promise<void>
   tryLoadFromWorkspace(projectPath: string): Promise<boolean>
+  /** Load cached graph or run analysis when none exists. */
+  loadOrAnalyzeWorkspace(projectPath: string): Promise<void>
+  scheduleReanalyze(projectPath: string): void
+  expandNodeAnalysis(projectId: string, nodeId: string): Promise<void>
+  refineNode(projectId: string, nodeId: string): Promise<RefineNodeResponse>
+  validateGraphEdit(projectId: string, edit: GraphEdit): Promise<ValidateEditResponse>
+  applyGraphEdit(projectId: string, edit: GraphEdit, force?: boolean): Promise<ApplyGraphEditResponse>
+  getChangelog(projectId: string, nodeId?: string): Promise<GraphChangelogEntry[]>
+  exportChangelog(projectId: string): Promise<string>
+  resolveNodeId(projectId: string, nodeIdOrAlias: string): Promise<string | null>
   getNodeDetail(projectId: string, nodeId: string): Promise<NodeDetailResponse | null>
   selectNode(projectId: string, nodeId: string): Promise<void>
+  selectProject(projectId: string): Promise<void>
+  /** M2 stub: validate nodeId against current thread binding */
+  submitPrompt(nodeId: string, text: string): Promise<SubmitPromptResponse>
   clearSelection(): void
+  toggleNodeExpanded(nodeId: string): void
+  collapseAllNodes(): void
+  isNodeExpanded(nodeId: string): boolean
+  /** Drill-down: show map centered on this node (null = project overview). */
+  setFocusNode(nodeId: string | null): void
+  drillIntoNode(nodeId: string): void
+  navigateFocusUp(): void
 }
 
 export const IProjectOsService = createDecorator<IProjectOsService>('projectOsService')

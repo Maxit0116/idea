@@ -63,7 +63,7 @@ export const defaultProviderSettings = {
 	awsBedrock: {
 		apiKey: '',
 		region: 'us-east-1', // add region setting
-		endpoint: '', // optionally allow overriding default
+		endpoint: 'http://localhost:4000/v1', // optional proxy; defaults to local LiteLLM
 	},
 
 } as const
@@ -106,8 +106,8 @@ export const defaultModelsOfProvider = {
 		'gemini-2.5-pro-preview-05-06',
 	],
 	deepseek: [ // https://api-docs.deepseek.com/quick_start/pricing
-		'deepseek-chat',
-		'deepseek-reasoner',
+		'deepseek-v4-flash',
+		'deepseek-v4-pro',
 	],
 	ollama: [ // autodetected
 	],
@@ -361,7 +361,7 @@ const openSourceModelOptions_assumingOAICompat = {
 	'qwen3': {
 		supportsFIM: false, // replaces QwQ
 		supportsSystemMessage: 'system-role',
-		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true, openSourceThinkTags: ['<think>', '</think>'] },
+		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true, openSourceThinkTags: [String.fromCharCode(60) + 'think', String.fromCharCode(60) + '/' + 'think' + String.fromCharCode(62)] as [string, string] },
 		contextWindow: 32_768, reservedOutputTokenSpace: 8_192,
 	},
 	// FIM only
@@ -925,30 +925,74 @@ const geminiSettings: VoidStaticProviderInfo = {
 
 
 // ---------------- DEEPSEEK API ----------------
+// https://api-docs.deepseek.com/guides/thinking_mode
+const deepseekIncludeInPayloadReasoning = (reasoningInfo: SendableReasoningInfo) => {
+	if (!reasoningInfo?.isReasoningEnabled) {
+		return { extra_body: { thinking: { type: 'disabled' } } }
+	}
+	const payload: { [key: string]: any } = {
+		extra_body: { thinking: { type: 'enabled' } },
+	}
+	if (reasoningInfo.type === 'effort_slider_value') {
+		payload.reasoning_effort = reasoningInfo.reasoningEffort
+	}
+	return payload
+}
+
 const deepseekModelOptions = {
-	'deepseek-chat': {
-		...openSourceModelOptions_assumingOAICompat.deepseekR1,
-		contextWindow: 64_000, // https://api-docs.deepseek.com/quick_start/pricing
-		reservedOutputTokenSpace: 8_000, // 8_000,
-		cost: { cache_read: .07, input: .27, output: 1.10, },
+	'deepseek-v4-flash': {
+		contextWindow: 1_000_000,
+		reservedOutputTokenSpace: 32_768,
+		cost: { cache_read: 0.0028, input: 0.14, output: 0.28 },
 		downloadable: false,
+		supportsFIM: false,
+		supportsSystemMessage: 'system-role',
+		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true, reasoningSlider: { type: 'effort_slider', values: ['high', 'max'], default: 'high' } },
+	},
+	'deepseek-v4-pro': {
+		contextWindow: 1_000_000,
+		reservedOutputTokenSpace: 32_768,
+		cost: { cache_read: 0.003625, input: 0.435, output: 0.87 },
+		downloadable: false,
+		supportsFIM: false,
+		supportsSystemMessage: 'system-role',
+		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true, reasoningSlider: { type: 'effort_slider', values: ['high', 'max'], default: 'high' } },
+	},
+	// Legacy aliases — deprecated 2026-07-24
+	'deepseek-chat': {
+		contextWindow: 1_000_000,
+		reservedOutputTokenSpace: 32_768,
+		cost: { cache_read: 0.0028, input: 0.14, output: 0.28 },
+		downloadable: false,
+		supportsFIM: false,
+		supportsSystemMessage: 'system-role',
+		reasoningCapabilities: false,
 	},
 	'deepseek-reasoner': {
-		...openSourceModelOptions_assumingOAICompat.deepseekCoderV2,
-		contextWindow: 64_000,
-		reservedOutputTokenSpace: 8_000, // 8_000,
-		cost: { cache_read: .14, input: .55, output: 2.19, },
+		contextWindow: 1_000_000,
+		reservedOutputTokenSpace: 32_768,
+		cost: { cache_read: 0.0028, input: 0.14, output: 0.28 },
 		downloadable: false,
+		supportsFIM: false,
+		supportsSystemMessage: 'system-role',
+		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: false, canIOReasoning: true },
 	},
 } as const satisfies { [s: string]: VoidStaticModelInfo }
 
 
 const deepseekSettings: VoidStaticProviderInfo = {
 	modelOptions: deepseekModelOptions,
-	modelOptionsFallback: (modelName) => { return null },
+	modelOptionsFallback: (modelName) => {
+		const lower = modelName.toLowerCase()
+		if (lower.includes('v4-pro')) return { modelName: 'deepseek-v4-pro', recognizedModelName: 'deepseek-v4-pro', ...deepseekModelOptions['deepseek-v4-pro'] }
+		if (lower.includes('v4-flash') || lower.includes('deepseek-chat') || lower.includes('deepseek-reasoner')) {
+			return { modelName: 'deepseek-v4-flash', recognizedModelName: 'deepseek-v4-flash', ...deepseekModelOptions['deepseek-v4-flash'] }
+		}
+		return null
+	},
 	providerReasoningIOSettings: {
-		// reasoning: OAICompat +  response.choices[0].delta.reasoning_content // https://api-docs.deepseek.com/guides/reasoning_model
-		input: { includeInPayload: openAICompatIncludeInPayloadReasoning },
+		// reasoning: OAICompat + response.choices[0].delta.reasoning_content
+		input: { includeInPayload: deepseekIncludeInPayloadReasoning },
 		output: { nameOfFieldInDelta: 'reasoning_content' },
 	},
 }
@@ -1207,6 +1251,15 @@ const ollamaModelOptions = {
 		supportsFIM: false,
 		supportsSystemMessage: 'system-role',
 		reasoningCapabilities: false,
+	},
+	'qwen3:8b': {
+		contextWindow: 40_960,
+		reservedOutputTokenSpace: 8_192,
+		cost: { input: 0, output: 0 },
+		downloadable: { sizeGb: 5.2 },
+		supportsFIM: false,
+		supportsSystemMessage: 'system-role',
+		reasoningCapabilities: { supportsReasoning: true, canTurnOffReasoning: true, canIOReasoning: true, openSourceThinkTags: [String.fromCharCode(60) + 'think', String.fromCharCode(60) + '/' + 'think' + String.fromCharCode(62)] as [string, string] },
 	},
 
 } as const satisfies Record<string, VoidStaticModelInfo>

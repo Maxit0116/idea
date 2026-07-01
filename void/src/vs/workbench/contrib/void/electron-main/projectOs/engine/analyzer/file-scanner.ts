@@ -7,6 +7,8 @@ import type { FileType } from '../../../../common/projectOsTypes.js'
 const IGNORE_DIRS = new Set([
   'node_modules', '.git', '.next', 'dist', 'build', 'out',
   '.projectos', '.cache', '.turbo', 'coverage', '.vercel',
+  '.build', 'remote', 'test', 'tests', '__mocks__', '.github',
+  'ThirdParty', 'fixtures', '.tmp',
 ])
 
 const CODE_EXTENSIONS = new Set([
@@ -89,6 +91,20 @@ function classifyFile(relPath: string, ext: string): FileType {
   // Pages (Pages Router)
   if (/^pages\/.*\.(tsx|jsx|ts|js)$/.test(normalized) && !normalized.startsWith('pages/api/')) {
     return 'page'
+  }
+
+  // VS Code / large IDE projects
+  if (normalized.startsWith('src/vs/workbench/contrib/')) {
+    return 'component'
+  }
+  if (normalized.startsWith('src/vs/workbench/services/')) {
+    return 'lib'
+  }
+  if (normalized.startsWith('src/vs/platform/')) {
+    return 'lib'
+  }
+  if (normalized.startsWith('extensions/')) {
+    return 'component'
   }
 
   // Components
@@ -185,7 +201,12 @@ export async function scanFiles(projectRoot: string): Promise<ScannedFile[]> {
 
 export async function readPackageJson(
   projectRoot: string,
-): Promise<{ name: string; dependencies: Record<string, string>; devDependencies: Record<string, string> } | null> {
+): Promise<{
+  name: string
+  dependencies: Record<string, string>
+  devDependencies: Record<string, string>
+  workspaces?: string[] | { packages: string[] }
+} | null> {
   const pkgPath = path.join(projectRoot, 'package.json')
   try {
     const raw = await fs.readFile(pkgPath, 'utf-8')
@@ -194,6 +215,7 @@ export async function readPackageJson(
       name: pkg.name ?? '',
       dependencies: pkg.dependencies ?? {},
       devDependencies: pkg.devDependencies ?? {},
+      workspaces: pkg.workspaces,
     }
   } catch {
     return null

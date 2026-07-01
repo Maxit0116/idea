@@ -8,7 +8,7 @@ import { useAccessor, useIsDark, useSettingsState } from '../util/services.js';
 import { Brain, Check, ChevronRight, DollarSign, ExternalLink, Lock, X } from 'lucide-react';
 import { displayInfoOfProviderName, ProviderName, providerNames, localProviderNames, featureNames, FeatureName, isFeatureNameDisabled } from '../../../../common/voidSettingsTypes.js';
 import { ChatMarkdownRender } from '../markdown/ChatMarkdownRender.js';
-import { OllamaSetupInstructions, OneClickSwitchButton, SettingsForProvider, ModelDump } from '../void-settings-tsx/Settings.js';
+import { OllamaSetupInstructions, OneClickSwitchButton, SettingsForProvider, ModelDump, ConfirmModelSettingsFooter } from '../void-settings-tsx/Settings.js';
 import { ColorScheme } from '../../../../../../../platform/theme/common/theme.js';
 import ErrorBoundary from '../sidebar-tsx/ErrorBoundary.js';
 import { isLinux } from '../../../../../../../base/common/platform.js';
@@ -129,7 +129,21 @@ const featureNameMap: { display: string, featureName: FeatureName }[] = [
 const AddProvidersPage = ({ pageIndex, setPageIndex }: { pageIndex: number, setPageIndex: (index: number) => void }) => {
 	const [currentTab, setCurrentTab] = useState<TabName>('Free');
 	const settingsState = useSettingsState();
+	const accessor = useAccessor();
+	const voidSettingsService = accessor.get('IVoidSettingsService');
 	const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+	const handleConfirmSettings = async () => {
+		voidSettingsService.confirmProviderSetup();
+		const latestState = voidSettingsService.state;
+		const isDisabled = isFeatureNameDisabled('Chat', latestState);
+
+		if (!isDisabled) {
+			setErrorMessage(null);
+		} else {
+			setErrorMessage('请先填写 API Key，并在下方 Models 区域开启至少一个 Chat 模型，然后再次确认。');
+		}
+	};
 
 	// Clear error message after 5 seconds
 	useEffect(() => {
@@ -151,7 +165,7 @@ const AddProvidersPage = ({ pageIndex, setPageIndex }: { pageIndex: number, setP
 
 	return (<div className="flex flex-col md:flex-row w-full h-[80vh] gap-6 max-w-[900px] mx-auto relative">
 		{/* Left Column */}
-		<div className="md:w-1/4 w-full flex flex-col gap-6 p-6 border-none border-void-border-2 h-full overflow-y-auto">
+		<div className="md:w-1/4 w-full flex flex-col gap-6 p-6 border-none border-void-border-2 h-full overflow-y-auto shrink-0">
 			{/* Tab Selector */}
 			<div className="flex md:flex-col gap-2">
 				{[...tabNames, 'Cloud/Other'].map(tab => (
@@ -191,8 +205,10 @@ const AddProvidersPage = ({ pageIndex, setPageIndex }: { pageIndex: number, setP
 			</div>
 		</div>
 
-		{/* Right Column */}
-		<div className="flex-1 flex flex-col items-center justify-start p-6 h-full overflow-y-auto">
+		{/* Right Column — scrollable content + fixed confirm footer */}
+		<div className="flex-1 flex flex-col min-h-0 min-w-0">
+			<div className="flex-1 overflow-y-auto p-6">
+			<div className="flex flex-col items-center justify-start">
 			<div className="text-5xl mb-2 text-center w-full">Add a Provider</div>
 
 			<div className="w-full max-w-xl mt-4 mb-10">
@@ -229,45 +245,62 @@ const AddProvidersPage = ({ pageIndex, setPageIndex }: { pageIndex: number, setP
 				</div>
 			))}
 
-			{(currentTab === 'Local' || currentTab === 'Cloud/Other') && (
+			{(currentTab === 'Local' || currentTab === 'Cloud/Other' || currentTab === 'Free' || currentTab === 'Paid') && (
 				<div className="w-full max-w-xl mt-8 bg-void-bg-2/50 rounded-lg p-6 border border-void-border-4">
 					<div className="flex items-center gap-2 mb-4">
 						<div className="text-xl font-medium">Models</div>
 					</div>
 
 					{currentTab === 'Local' && (
-						<div className="text-sm opacity-80 text-void-fg-3 my-4 w-full">Local models should be detected automatically. You can add custom models below.</div>
+						<div className="text-sm opacity-80 text-void-fg-3 my-4 w-full">Local models should be detected automatically. You can add custom models below, or skip and configure later in Settings.</div>
+					)}
+
+					{(currentTab === 'Free' || currentTab === 'Paid') && (
+						<div className="text-sm opacity-80 text-void-fg-3 my-4 w-full">After entering your API key, toggle models on below. You can also skip and configure later in Settings.</div>
+					)}
+
+					{currentTab === 'Cloud/Other' && (
+						<div className="text-sm opacity-80 text-void-fg-3 my-4 w-full">Fill in all required provider fields, then enable models below. You can also skip and configure later in Settings.</div>
 					)}
 
 					{currentTab === 'Local' && <ModelDump filteredProviders={localProviderNames} />}
 					{currentTab === 'Cloud/Other' && <ModelDump filteredProviders={cloudProviders} />}
+					{(currentTab === 'Free' || currentTab === 'Paid') && <ModelDump filteredProviders={providerNamesOfTab[currentTab]} />}
 				</div>
 			)}
 
 
 
-			{/* Navigation buttons in right column */}
-			<div className="flex flex-col items-end w-full mt-auto pt-8">
+			{/* Navigation buttons */}
+			<div className="flex flex-col items-end w-full mt-8 pt-4 border-t border-void-border">
 				{errorMessage && (
-					<div className="text-amber-400 mb-2 text-sm opacity-80 transition-opacity duration-300">{errorMessage}</div>
+					<div className="text-amber-400 mb-2 text-sm opacity-80 transition-opacity duration-300 w-full text-right">{errorMessage}</div>
 				)}
-				<div className="flex items-center gap-2">
+				<div className="flex items-center justify-end w-full gap-2 py-2">
 					<PreviousButton onClick={() => setPageIndex(pageIndex - 1)} />
+					<SkipButton onClick={() => {
+						setPageIndex(pageIndex + 1);
+						setErrorMessage(null);
+					}} />
 					<NextButton
-						onClick={() => {
-							const isDisabled = isFeatureNameDisabled('Chat', settingsState)
+						onClick={async () => {
+							await handleConfirmSettings();
+							const latestState = voidSettingsService.state;
+							const isDisabled = isFeatureNameDisabled('Chat', latestState);
 
 							if (!isDisabled) {
 								setPageIndex(pageIndex + 1);
 								setErrorMessage(null);
-							} else {
-								// Show error message
-								setErrorMessage("Please set up at least one Chat model before moving on.");
+							} else if (!errorMessage) {
+								setErrorMessage("Please set up at least one Chat model before moving on, or click Skip for now to configure later in Settings.");
 							}
 						}}
 					/>
 				</div>
 			</div>
+			</div>
+			</div>
+			<ConfirmModelSettingsFooter />
 		</div>
 	</div>);
 };
@@ -312,6 +345,18 @@ const AddProvidersPage = ({ pageIndex, setPageIndex }: { pageIndex: number, setP
 // 		title
 // 		content
 // 		prev/next
+
+const SkipButton = ({ onClick, ...props }: { onClick: () => void } & React.ButtonHTMLAttributes<HTMLButtonElement>) => {
+	return (
+		<button
+			onClick={onClick}
+			className="px-6 py-2 rounded text-void-fg-3 opacity-80 hover:brightness-115 duration-600 transition-all"
+			{...props}
+		>
+			Skip for now
+		</button>
+	)
+}
 
 const NextButton = ({ onClick, ...props }: { onClick: () => void } & React.ButtonHTMLAttributes<HTMLButtonElement>) => {
 

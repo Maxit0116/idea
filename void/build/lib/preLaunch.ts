@@ -39,6 +39,22 @@ async function getElectron() {
 	await runProcess(npm, ['run', 'electron']);
 }
 
+async function ensureRipgrep() {
+	const rgBin = path.join(rootDir, 'node_modules', '@vscode', 'ripgrep', 'bin', 'rg');
+	try {
+		await fs.stat(rgBin);
+	} catch {
+		await runProcess(npm, ['exec', '--', 'node', './node_modules/@vscode/ripgrep/lib/postinstall.js']);
+	}
+}
+
+async function ensureReactCompiled() {
+	const reactOut = 'src/vs/workbench/contrib/void/browser/react/out';
+	if (!(await exists(reactOut))) {
+		await runProcess(npm, ['run', 'buildreact']);
+	}
+}
+
 async function ensureCompiled() {
 	if (!(await exists('out'))) {
 		await runProcess(npm, ['run', 'compile']);
@@ -48,6 +64,8 @@ async function ensureCompiled() {
 async function main() {
 	await ensureNodeModules();
 	await getElectron();
+	await ensureRipgrep();
+	await ensureReactCompiled();
 	await ensureCompiled();
 
 	// Can't require this until after dependencies are installed

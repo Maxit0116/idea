@@ -108,17 +108,31 @@ registerAction2(class extends Action2 {
 	}
 });
 
-class ProjectOsWorkspaceContribution implements IWorkbenchContribution {
+class ProjectOsWorkspaceContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.projectOsWorkspace';
 
 	constructor(
 		@IWorkspaceContextService private readonly workspaceService: IWorkspaceContextService,
 		@IProjectOsService private readonly projectOsService: IProjectOsService,
+		@IEditorService private readonly editorService: IEditorService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IViewsService private readonly viewsService: IViewsService,
 	) {
-		const folders = this.workspaceService.getWorkspace().folders;
-		if (folders.length > 0) {
-			void this.projectOsService.tryLoadFromWorkspace(folders[0].uri.fsPath);
-		}
+		super();
+		const runForWorkspace = () => {
+			const folders = this.workspaceService.getWorkspace().folders;
+			if (folders.length === 0) {
+				return;
+			}
+			void (async () => {
+				const input = this.instantiationService.createInstance(FunctionMapInput);
+				await this.editorService.openEditor(input, { pinned: true });
+				await this.viewsService.openViewContainer(FUNCTION_MAP_VIEW_CONTAINER_ID);
+				void this.projectOsService.loadOrAnalyzeWorkspace(folders[0].uri.fsPath);
+			})();
+		};
+		runForWorkspace();
+		this._register(this.workspaceService.onDidChangeWorkspaceFolders(() => runForWorkspace()));
 	}
 }
 

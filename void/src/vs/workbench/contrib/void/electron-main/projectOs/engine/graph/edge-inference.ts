@@ -52,11 +52,12 @@ function inferFromImports(
     const [source, target] = key.split('->')
     const confidence = Math.min(0.95, 0.6 + 0.1 * count)
 
+    // Technical import edges — stored for internal index, not shown on Function Map
     edges.push({
       id: `edge_${projectOsUuid().slice(0, 8)}`,
       source,
       target,
-      relation: 'depends_on',
+      relation: 'imports',
       confidence,
       evidence: `${count} cross-node import(s)`,
     })
@@ -196,8 +197,9 @@ export function inferEdges(
   // Strategy 3: Shared data via database node
   inferSharedData(nodes, seen, edges)
 
-  // Populate upstream/downstream on each node
-  populateAdjacency(nodes, edges)
+  // Populate upstream/downstream from user-visible functional edges only
+  const displayEdges = edges.filter(e => e.relation !== 'imports')
+  populateAdjacency(nodes, displayEdges)
 
   return edges
 }

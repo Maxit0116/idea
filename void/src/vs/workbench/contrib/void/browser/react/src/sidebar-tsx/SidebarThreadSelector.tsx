@@ -207,15 +207,19 @@ const PastThreadElement = ({ pastThread, idx, hoveredIdx, setHoveredIdx, isRunni
 	// 	toolTipName={`Copy As Void Chat`}
 	// />
 
-	let firstMsg = null;
+	const binding = pastThread.state.functionMapBinding
+
+	let firstMsg = '';
 	const firstUserMsgIdx = pastThread.messages.findIndex((msg) => msg.role === 'user');
 
 	if (firstUserMsgIdx !== -1) {
 		const firsUsertMsgObj = pastThread.messages[firstUserMsgIdx];
 		firstMsg = firsUsertMsgObj.role === 'user' && firsUsertMsgObj.displayContent || '';
-	} else {
-		firstMsg = '""';
 	}
+
+	const displayTitle = binding
+		? `${binding.level === 'project' ? '项目' : '功能节点'} · ${binding.label}${firstMsg ? ` — ${firstMsg}` : ''}`
+		: (firstMsg || '""');
 
 	const numMessages = pastThread.messages.filter((msg) => msg.role === 'assistant' || msg.role === 'user').length;
 
@@ -252,9 +256,9 @@ const PastThreadElement = ({ pastThread, idx, hoveredIdx, setHoveredIdx, isRunni
 				{/* name */}
 				<span className="truncate overflow-hidden text-ellipsis"
 					data-tooltip-id='void-tooltip'
-					data-tooltip-content={numMessages + ' messages'}
+					data-tooltip-content={binding ? `${binding.level === 'project' ? '项目' : '功能节点'}: ${binding.label}` : numMessages + ' messages'}
 					data-tooltip-place='top'
-				>{firstMsg}</span>
+				>{displayTitle}</span>
 
 				{/* <span className='opacity-60'>{`(${numMessages})`}</span> */}
 			</span>

@@ -12,6 +12,11 @@ import type { FunctionalNode, FunctionalEdge } from '../../../../common/projectO
 
 const ROOT_ID = 'sys_root';
 
+export interface EnrichTopologyOptions {
+	/** When true, preserve AI-generated parentId/children; only inject sys_root and recompute depth/refs */
+	preserveHierarchy?: boolean
+}
+
 /**
  * Enrich flat capability nodes into a Stello-style topology forest:
  * - One system root at depth 0
@@ -21,33 +26,37 @@ const ROOT_ID = 'sys_root';
 export function enrichTopology(
 	nodes: FunctionalNode[],
 	edges: FunctionalEdge[],
+	projectName?: string,
+	options?: EnrichTopologyOptions,
 ): FunctionalNode[] {
 	if (nodes.length === 0) {
 		return nodes;
 	}
 
 	const nodeMap = new Map(nodes.map(n => [n.id, n]));
-	const root = createRootNode(nodes);
+	const root = createRootNode(nodes, projectName);
 	const enriched: FunctionalNode[] = [root];
 
-	// Detect nested routes: /dashboard/settings → settings nested under dashboard
-	const nested = detectNestedHierarchy(nodes);
-
-	for (const node of nodes) {
-		const parentId = nested.get(node.id) ?? ROOT_ID;
-		const depth = parentId === ROOT_ID ? 1 : (nodeMap.get(parentId)?.depth ?? 0) + 1;
-		const refs = computeRefs(node.id, edges, parentId);
-
-		enriched.push({
-			...node,
-			parentId,
-			children: [],
-			refs,
-			depth,
-		});
+	if (options?.preserveHierarchy) {
+		const preserved = enrichPreservingHierarchy(nodes, edges, nodeMap);
+		enriched.push(...preserved);
+	} else {
+		const nested = detectNestedHierarchy(nodes);
+		for (const node of nodes) {
+			const parentId = nested.get(node.id) ?? ROOT_ID;
+			const depth = parentId === ROOT_ID ? 1 : (nodeMap.get(parentId)?.depth ?? 0) + 1;
+			const refs = computeRefs(node.id, edges, parentId);
+			enriched.push({
+				...node,
+				parentId,
+				children: [],
+				refs,
+				depth,
+			});
+		}
 	}
 
-	// Populate children arrays
+	// Populate children arrays from parentId links
 	for (const node of enriched) {
 		if (node.parentId) {
 			const parent = enriched.find(n => n.id === node.parentId);
@@ -60,16 +69,70 @@ export function enrichTopology(
 	return enriched;
 }
 
-function createRootNode(nodes: FunctionalNode[]): FunctionalNode {
-	const totalFiles = nodes.reduce((sum, n) => sum + n.linkedFiles.length, 0);
+/** Preserve AI tree parent links; recompute depth from parent chain; attach orphans to sys_root */
+function enrichPreservingHierarchy(
+	nodes: FunctionalNode[],
+	edges: FunctionalEdge[],
+	nodeMap: Map<string, FunctionalNode>,
+): FunctionalNode[] {
+	const idSet = new Set(nodes.map(n => n.id));
+
+	function resolveParentId(node: FunctionalNode): string {
+		const pid = node.parentId;
+		if (!pid || pid === node.id) {
+			return ROOT_ID;
+		}
+		if (pid === ROOT_ID) {
+			return ROOT_ID;
+		}
+		if (idSet.has(pid)) {
+			return pid;
+		}
+		return ROOT_ID;
+	}
+
+	function computeDepth(nodeId: string, parentId: string, visiting = new Set<string>()): number {
+		if (parentId === ROOT_ID) {
+			return 1;
+		}
+		if (visiting.has(nodeId)) {
+			return 1;
+		}
+		visiting.add(nodeId);
+		const parent = nodeMap.get(parentId);
+		if (!parent) {
+			return 1;
+		}
+		const grandParent = resolveParentId(parent);
+		return 1 + computeDepth(parentId, grandParent, visiting);
+	}
+
+	return nodes.map(node => {
+		const parentId = resolveParentId(node);
+		const depth = computeDepth(node.id, parentId);
+		const refs = computeRefs(node.id, edges, parentId);
+		return {
+			...node,
+			parentId,
+			children: node.children ?? [],
+			refs,
+			depth,
+		};
+	});
+}
+
+function createRootNode(nodes: FunctionalNode[], projectName?: string): FunctionalNode {
+	const featureNodes = nodes.filter(n => n.id !== ROOT_ID);
+	const totalFiles = featureNodes.reduce((sum, n) => sum + n.linkedFiles.length, 0);
+	const displayName = projectName?.trim() || '项目';
 	return {
 		id: ROOT_ID,
 		type: 'capability',
-		name: '项目架构',
-		nameEn: 'System Root',
+		name: displayName,
+		nameEn: 'Project Root',
 		status: 'active',
-		description: 'Architecture root — all capability nodes branch from here',
-		summary: `${nodes.length} 个功能模块，${totalFiles} 个关联文件`,
+		description: '项目根节点 — 所有功能模块从此展开',
+		summary: `${featureNodes.length} 个功能模块，${totalFiles} 个关联文件`,
 		parentId: null,
 		children: [],
 		refs: [],
@@ -80,6 +143,7 @@ function createRootNode(nodes: FunctionalNode[]): FunctionalNode {
 		preview: null,
 		confidence: 1,
 		tags: ['infrastructure'],
+		granularity: 'project',
 	};
 }
 

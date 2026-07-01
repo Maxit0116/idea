@@ -284,8 +284,9 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 	const { canIOReasoning, openSourceThinkTags } = reasoningCapabilities || {}
 	const reasoningInfo = getSendableReasoningInfo('Chat', providerName, modelName_, modelSelectionOptions, overridesOfModel) // user's modelName_ here
 
+	const reasoningPayload = providerReasoningIOSettings?.input?.includeInPayload?.(reasoningInfo) ?? {}
 	const includeInPayload = {
-		...providerReasoningIOSettings?.input?.includeInPayload?.(reasoningInfo),
+		...reasoningPayload,
 		...additionalOpenAIPayload
 	}
 
@@ -306,6 +307,7 @@ const _sendOpenAICompatibleChat = async ({ messages, onText, onFinalMessage, onE
 		messages: messages as any,
 		stream: true,
 		...nativeToolsObj,
+		...reasoningPayload,
 		...additionalOpenAIPayload
 		// max_completion_tokens: maxTokens,
 	}

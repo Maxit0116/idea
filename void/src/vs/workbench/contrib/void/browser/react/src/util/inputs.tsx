@@ -1178,14 +1178,21 @@ export const VoidSwitch = ({
 	size?: 'xxs' | 'xs' | 'sm' | 'sm+' | 'md';
 }) => {
 	return (
-		<label className="inline-flex items-center" {...props}>
-			<div
-				onClick={() => !disabled && onChange(!value)}
+		<label className={`inline-flex items-center ${disabled ? 'opacity-25 cursor-not-allowed' : 'cursor-pointer'}`} {...props}>
+			<button
+				type="button"
+				disabled={disabled}
+				onClick={(e) => {
+					e.preventDefault()
+					e.stopPropagation()
+					if (!disabled) {
+						onChange(!value)
+					}
+				}}
 				className={`
-			cursor-pointer
-			relative inline-flex items-center rounded-full transition-colors duration-200 ease-in-out
+			relative inline-flex items-center rounded-full transition-colors duration-200 ease-in-out border-0 p-0
 			${value ? 'bg-zinc-900 dark:bg-white' : 'bg-white dark:bg-zinc-600'}
-			${disabled ? 'opacity-25' : ''}
+			${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}
 			${size === 'xxs' ? 'h-3 w-5' : ''}
 			${size === 'xs' ? 'h-4 w-7' : ''}
 			${size === 'sm' ? 'h-5 w-9' : ''}
@@ -1208,7 +1215,7 @@ export const VoidSwitch = ({
 			  ${size === 'md' ? (value ? 'translate-x-6' : 'translate-x-1') : ''}
 			`}
 				/>
-			</div>
+			</button>
 		</label>
 	);
 };

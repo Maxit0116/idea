@@ -38,6 +38,7 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { IDirectoryStrService } from '../common/directoryStrService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IMCPService } from '../common/mcpService.js';
+import { IProjectOsService, FunctionMapThreadBinding } from '../common/projectOsTypes.js';
 import { RawMCPToolCall } from '../common/mcpServiceTypes.js';
 
 
@@ -139,6 +140,8 @@ export type ThreadType = {
 			mountedIsResolvedRef: { current: boolean };
 		}
 
+		/** Function Map node ↔ thread binding (M1) */
+		functionMapBinding?: FunctionMapThreadBinding
 
 	};
 }
@@ -240,6 +243,13 @@ export interface IChatThreadService {
 	openNewThread(): void;
 	switchToThread(threadId: string): void;
 
+	/** Function Map: find thread bound to a node key */
+	findThreadByNodeKey(projectId: string, nodeKey: string): string | null;
+	/** Function Map: switch to existing bound thread or create a new one */
+	getOrCreateBoundThread(binding: FunctionMapThreadBinding): { threadId: string; isNew: boolean };
+	setThreadState(threadId: string, newState: Partial<ThreadType['state']>): void;
+	getThreadState(threadId: string): ThreadType['state'] | null;
+
 	// thread selector
 	deleteThread(threadId: string): void;
 	duplicateThread(threadId: string): void;
@@ -327,6 +337,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		@IDirectoryStrService private readonly _directoryStringService: IDirectoryStrService,
 		@IFileService private readonly _fileService: IFileService,
 		@IMCPService private readonly _mcpService: IMCPService,
+		@IProjectOsService private readonly _projectOsService: IProjectOsService,
 	) {
 		super()
 		this.state = { allThreads: {}, currentThreadId: null as unknown as string } // default state
@@ -1250,7 +1261,11 @@ We only need to do it for files that were edited since `from`, ie files between 
 		const instructions = userMessage
 		const currSelns: StagingSelectionItem[] = _chatSelections ?? thread.state.stagingSelections
 
-		const userMessageContent = await chat_userMessageContent(instructions, currSelns, { directoryStrService: this._directoryStringService, fileService: this._fileService }) // user message + names of files (NOT content)
+		const userMessageContent = await chat_userMessageContent(instructions, currSelns, {
+			directoryStrService: this._directoryStringService,
+			fileService: this._fileService,
+			functionMapContext: this._projectOsService.chatContext?.markdown ?? null,
+		})
 		const userHistoryElt: ChatMessage = { role: 'user', content: userMessageContent, displayContent: instructions, selections: currSelns, state: defaultMessageState }
 		this._addMessageToThread(threadId, userHistoryElt)
 
@@ -1622,6 +1637,59 @@ We only need to do it for files that were edited since `from`, ie files between 
 
 	switchToThread(threadId: string) {
 		this._setState({ currentThreadId: threadId })
+	}
+
+	findThreadByNodeKey(projectId: string, nodeKey: string): string | null {
+		for (const threadId in this.state.allThreads) {
+			const thread = this.state.allThreads[threadId]
+			const binding = thread?.state.functionMapBinding
+			if (binding && binding.projectId === projectId && binding.nodeKey === nodeKey) {
+				return threadId
+			}
+		}
+		return null
+	}
+
+	getOrCreateBoundThread(binding: FunctionMapThreadBinding): { threadId: string; isNew: boolean } {
+		const existingId = this.findThreadByNodeKey(binding.projectId, binding.nodeKey)
+		if (existingId) {
+			const thread = this.state.allThreads[existingId]
+			if (thread) {
+				this.setThreadState(existingId, { functionMapBinding: { ...binding } })
+			}
+			this.switchToThread(existingId)
+			return { threadId: existingId, isNew: false }
+		}
+
+		const newThread = newThreadObject()
+		;(newThread.state as ThreadType['state']).functionMapBinding = { ...binding }
+		const newThreads: ChatThreads = {
+			...this.state.allThreads,
+			[newThread.id]: newThread,
+		}
+		this._storeAllThreads(newThreads)
+		this._setState({ allThreads: newThreads, currentThreadId: newThread.id })
+		return { threadId: newThread.id, isNew: true }
+	}
+
+	getThreadState(threadId: string): ThreadType['state'] | null {
+		return this.state.allThreads[threadId]?.state ?? null
+	}
+
+	setThreadState(threadId: string, newState: Partial<ThreadType['state']>) {
+		const thread = this.state.allThreads[threadId]
+		if (!thread) {
+			return
+		}
+		const newThreads: ChatThreads = {
+			...this.state.allThreads,
+			[threadId]: {
+				...thread,
+				state: { ...thread.state, ...newState },
+			},
+		}
+		this._storeAllThreads(newThreads)
+		this._setState({ ...this.state, allThreads: newThreads })
 	}
 
 

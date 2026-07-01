@@ -6,7 +6,7 @@
 import React, { ButtonHTMLAttributes, FormEvent, FormHTMLAttributes, Fragment, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 
-import { useAccessor, useChatThreadsState, useChatThreadsStreamState, useSettingsState, useActiveURI, useCommandBarState, useFullChatThreadsStreamState } from '../util/services.js';
+import { useAccessor, useChatThreadsState, useChatThreadsStreamState, useSettingsState, useActiveURI, useCommandBarState, useFullChatThreadsStreamState, useProjectOsChatContext } from '../util/services.js';
 import { ScrollType } from '../../../../../../../editor/common/editorCommon.js';
 
 import { ChatMarkdownRender, ChatMessageLocation, getApplyBoxId } from '../markdown/ChatMarkdownRender.js';
@@ -2885,6 +2885,9 @@ export const SidebarChat = () => {
 	const accessor = useAccessor()
 	const commandService = accessor.get('ICommandService')
 	const chatThreadsService = accessor.get('IChatThreadService')
+	const projectOsService = accessor.get('IProjectOsService')
+
+	const functionMapContext = useProjectOsChatContext()
 
 	const settingsState = useSettingsState()
 	// ----- HIGHER STATE -----
@@ -3111,6 +3114,49 @@ export const SidebarChat = () => {
 
 
 
+	const functionMapContextBar = functionMapContext ? (
+		<div className="mx-2 mt-2 mb-1 px-3 py-2.5 rounded-lg border border-emerald-500/35 bg-emerald-600/10 text-xs flex-shrink-0">
+			<div className="flex items-start justify-between gap-2">
+				<div className="min-w-0 flex-1">
+					<div className="flex items-center gap-2">
+						<span className="inline-block w-2 h-2 rounded-full bg-emerald-400 flex-shrink-0" aria-hidden />
+						<span className="text-emerald-300 font-semibold">
+							已载入{functionMapContext.level === 'project' ? '项目' : '节点'} Context
+						</span>
+						<span className="text-void-fg-1 font-medium truncate">· {functionMapContext.label}</span>
+					</div>
+					{functionMapContext.summary && (
+						<div className="text-void-fg-3 mt-1.5 line-clamp-2 leading-relaxed pl-4">
+							{functionMapContext.summary}
+						</div>
+					)}
+					<div className="text-void-fg-3 mt-1 pl-4">
+						{functionMapContext.primaryFilePaths.length > 0
+							? `已自动纳入 ${functionMapContext.primaryFilePaths.length} 个核心文件，发送消息时将附带节点上下文`
+							: '发送消息时将附带项目级上下文'}
+					</div>
+					{functionMapContext.primaryFilePaths.length > 0 && (
+						<div className="flex flex-wrap gap-1 mt-2 pl-4">
+							{functionMapContext.primaryFilePaths.map(p => (
+								<span key={p} className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-200 font-mono truncate max-w-full">
+									{p.split('/').pop() ?? p}
+								</span>
+							))}
+						</div>
+					)}
+				</div>
+				<button
+					type="button"
+					onClick={() => projectOsService.clearSelection()}
+					className="text-void-fg-3 hover:text-void-fg-1 flex-shrink-0 text-sm leading-none px-1"
+					title="清除节点选中"
+				>
+					×
+				</button>
+			</div>
+		</div>
+	) : null
+
 	const threadPageInput = <div key={'input' + chatThreadsState.currentThreadId}>
 		<div className='px-4'>
 			<CommandBarInChat />
@@ -3121,7 +3167,7 @@ export const SidebarChat = () => {
 	</div>
 
 	const landingPageInput = <div>
-		<div className='pt-8'>
+		<div className={functionMapContext ? 'pt-2' : 'pt-8'}>
 			{inputChatArea}
 		</div>
 	</div>
@@ -3130,6 +3176,7 @@ export const SidebarChat = () => {
 		ref={sidebarRef}
 		className='w-full h-full max-h-full flex flex-col overflow-auto px-4'
 	>
+		{functionMapContextBar}
 		<ErrorBoundary>
 			{landingPageInput}
 		</ErrorBoundary>
@@ -3165,7 +3212,7 @@ export const SidebarChat = () => {
 		ref={sidebarRef}
 		className='w-full h-full flex flex-col overflow-hidden'
 	>
-
+		{functionMapContextBar}
 		<ErrorBoundary>
 			{messagesHTML}
 		</ErrorBoundary>

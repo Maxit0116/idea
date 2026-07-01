@@ -4,13 +4,14 @@
  *--------------------------------------------------------------------------------------*/
 
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'; // Added useRef import just in case it was missed, though likely already present
-import { ProviderName, SettingName, displayInfoOfSettingName, providerNames, VoidStatefulModelInfo, customSettingNamesOfProvider, RefreshableProviderName, refreshableProviderNames, displayInfoOfProviderName, nonlocalProviderNames, localProviderNames, GlobalSettingName, featureNames, displayInfoOfFeatureName, isProviderNameDisabled, FeatureName, hasDownloadButtonsOnModelsProviderNames, subTextMdOfProviderName } from '../../../../common/voidSettingsTypes.js'
+import { ProviderName, SettingName, displayInfoOfSettingName, providerNames, VoidStatefulModelInfo, customSettingNamesOfProvider, RefreshableProviderName, refreshableProviderNames, displayInfoOfProviderName, nonlocalProviderNames, localProviderNames, GlobalSettingName, featureNames, displayInfoOfFeatureName, isProviderNameDisabled, isProviderConfigured, hasProviderCredentials, FeatureName, hasDownloadButtonsOnModelsProviderNames, subTextMdOfProviderName, isFeatureNameDisabled, isProviderReadyForModelOptions } from '../../../../common/voidSettingsTypes.js'
 import ErrorBoundary from '../sidebar-tsx/ErrorBoundary.js'
 import { VoidButtonBgDarken, VoidCustomDropdownBox, VoidInputBox2, VoidSimpleInputBox, VoidSwitch } from '../util/inputs.js'
 import { useAccessor, useIsDark, useIsOptedOut, useRefreshModelListener, useRefreshModelState, useSettingsState } from '../util/services.js'
 import { X, RefreshCw, Loader2, Check, Asterisk, Plus } from 'lucide-react'
 import { URI } from '../../../../../../../base/common/uri.js'
 import { ModelDropdown } from './ModelDropdown.js'
+import { FunctionMapChangelogExport } from '../functionmap-tsx/functionMapParts.js'
 import { ChatMarkdownRender } from '../markdown/ChatMarkdownRender.js'
 import { WarningBox } from './WarningBox.js'
 import { os } from '../../../../common/helpers/systemInfo.js'
@@ -23,6 +24,7 @@ import { MCPServer } from '../../../../common/mcpServiceTypes.js';
 import { useMCPServiceState } from '../util/services.js';
 import { OPT_OUT_KEY } from '../../../../common/storageKeys.js';
 import { StorageScope, StorageTarget } from '../../../../../../../platform/storage/common/storage.js';
+import { VOID_CLOSE_SETTINGS_ACTION_ID } from '../../../voidSettingsPane.js';
 
 type Tab =
 	| 'models'
@@ -399,7 +401,7 @@ export const ModelDump = ({ filteredProviders }: { filteredProviders?: ProviderN
 	for (let providerName of providersToShow) {
 		const providerSettings = settingsState.settingsOfProvider[providerName]
 		// if (!providerSettings.enabled) continue
-		modelDump.push(...providerSettings.models.map(model => ({ ...model, providerName, providerEnabled: !!providerSettings._didFillInProviderSettings })))
+		modelDump.push(...providerSettings.models.map(model => ({ ...model, providerName, providerEnabled: isProviderReadyForModelOptions(providerName, settingsState) })))
 	}
 
 	// sort by hidden
@@ -443,11 +445,12 @@ export const ModelDump = ({ filteredProviders }: { filteredProviders?: ProviderN
 
 			const providerTitle = displayInfoOfProviderName(providerName).title
 
-			const disabled = !providerEnabled
-			const value = disabled ? false : !isHidden
+			const providerReady = isProviderReadyForModelOptions(providerName, settingsState)
+			const value = !isHidden
 
 			const tooltipName = (
-				disabled ? `Add ${providerTitle} to enable`
+				!providerReady
+					? (value ? 'Enabled — finish provider setup to use in Chat' : 'Enable model (finish provider setup to use in Chat)')
 					: value === true ? 'Show in Dropdown'
 						: 'Hide from Dropdown'
 			)
@@ -474,30 +477,27 @@ export const ModelDump = ({ filteredProviders }: { filteredProviders?: ProviderN
 				{/* right part is anything that fits */}
 				<div className="flex items-center gap-2 w-fit">
 
-					{/* Advanced Settings button (gear). Hide entirely when provider/model disabled. */}
-					{disabled ? null : (
-						<div className="w-5 flex items-center justify-center">
-							<button
-								onClick={() => { setOpenSettingsModel({ modelName, providerName, type }) }}
-								data-tooltip-id='void-tooltip'
-								data-tooltip-place='right'
-								data-tooltip-content='Advanced Settings'
-								className={`${hasOverrides ? '' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}
-							>
-								<Plus size={12} className="text-void-fg-3 opacity-50" />
-							</button>
-						</div>
-					)}
+					{/* Advanced Settings button (gear) */}
+					<div className="w-5 flex items-center justify-center">
+						<button
+							onClick={() => { setOpenSettingsModel({ modelName, providerName, type }) }}
+							data-tooltip-id='void-tooltip'
+							data-tooltip-place='right'
+							data-tooltip-content='Advanced Settings'
+							className={`${hasOverrides ? '' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}
+						>
+							<Plus size={12} className="text-void-fg-3 opacity-50" />
+						</button>
+					</div>
 
 					{/* Blue star */}
 					{detailAboutModel}
 
 
-					{/* Switch */}
+					{/* Switch — always interactive; models appear in Chat only after provider is fully configured */}
 					<VoidSwitch
 						value={value}
-						onChange={() => { settingsStateService.toggleModelHidden(providerName, modelName); }}
-						disabled={disabled}
+						onChange={() => { settingsStateService.toggleModelHidden(providerName, modelName) }}
 						size='sm'
 
 						data-tooltip-id='void-tooltip'
@@ -608,6 +608,103 @@ export const ModelDump = ({ filteredProviders }: { filteredProviders?: ProviderN
 
 
 
+/** Sticky footer: confirm API keys + enabled models and apply to Chat */
+export const ConfirmModelSettingsFooter = ({
+	className = '',
+	closeSettingsOnSuccess = true,
+}: {
+	className?: string
+	/** Close Void Settings editor tab after a successful confirm */
+	closeSettingsOnSuccess?: boolean
+}) => {
+	const accessor = useAccessor()
+	const voidSettingsService = accessor.get('IVoidSettingsService')
+	const notificationService = accessor.get('INotificationService')
+	const commandService = accessor.get('ICommandService')
+	const settingsState = useSettingsState()
+	const [settingsConfirmed, setSettingsConfirmed] = useState(false)
+	const [errorMessage, setErrorMessage] = useState<string | null>(null)
+
+	const chatModel = settingsState.modelSelectionOfFeature.Chat
+	const chatReady = !isFeatureNameDisabled('Chat', settingsState)
+
+	useEffect(() => {
+		setSettingsConfirmed(false)
+	}, [settingsState.settingsOfProvider, settingsState.modelSelectionOfFeature.Chat, settingsState._modelOptions])
+
+	useEffect(() => {
+		if (!errorMessage) return
+		const t = setTimeout(() => setErrorMessage(null), 6000)
+		return () => clearTimeout(t)
+	}, [errorMessage])
+
+	const handleConfirm = async () => {
+		// Flush any focused input (API key field) before reading state
+		if (document.activeElement instanceof HTMLElement) {
+			document.activeElement.blur()
+		}
+		await voidSettingsService.waitForInitState
+		voidSettingsService.confirmProviderSetup()
+		const latestState = voidSettingsService.state
+		if (!isFeatureNameDisabled('Chat', latestState)) {
+			setSettingsConfirmed(true)
+			setErrorMessage(null)
+			const chat = latestState.modelSelectionOfFeature.Chat
+			if (chat) {
+				const providerTitle = displayInfoOfProviderName(chat.providerName).title
+				notificationService.info(`Settings applied. Chat is now connected to ${chat.modelName} (${providerTitle}).`)
+			} else {
+				notificationService.info('Settings applied. Chat is ready to use.')
+			}
+			if (closeSettingsOnSuccess) {
+				await commandService.executeCommand(VOID_CLOSE_SETTINGS_ACTION_ID)
+			}
+		} else {
+			setSettingsConfirmed(false)
+			const geminiKey = typeof latestState.settingsOfProvider.gemini.apiKey === 'string'
+				? latestState.settingsOfProvider.gemini.apiKey
+				: ''
+			const hasKey = providerNames.some(p => isProviderReadyForModelOptions(p, latestState))
+			const hasModel = latestState._modelOptions.length > 0
+			if (!hasKey && geminiKey.length === 0) {
+				setErrorMessage('Enter an API key in Main Providers first.')
+			} else if (!hasModel) {
+				setErrorMessage('Enable at least one model in the Models tab (toggle switch on).')
+			} else {
+				setErrorMessage('Could not apply settings to Chat. Try enabling a model and click Confirm again.')
+			}
+		}
+	}
+
+	return (
+		<div className={`border-t border-void-border-4 bg-void-bg-2/95 backdrop-blur-sm px-6 py-4 ${className}`}>
+			<div className="max-w-3xl mx-auto flex flex-col gap-2">
+				{errorMessage && (
+					<div className="text-amber-400 text-sm">{errorMessage}</div>
+				)}
+				<div className="flex items-center justify-between gap-4 flex-wrap">
+					<div className="text-sm text-void-fg-3">
+						{chatReady && chatModel
+							? <>Chat: <span className="text-void-fg-1 font-medium">{chatModel.modelName}</span> ({displayInfoOfProviderName(chatModel.providerName).title})</>
+							: 'Enter API key, enable a model, then click Confirm'}
+					</div>
+					<button
+						type="button"
+						onClick={handleConfirm}
+						className={`px-5 py-2 rounded-lg text-sm font-medium transition-colors shrink-0 ${settingsConfirmed
+							? 'bg-emerald-600/20 text-emerald-400 border border-emerald-500/40'
+							: 'bg-[#0e70c0] hover:bg-[#0e70c0]/90 text-white'
+							}`}
+					>
+						{settingsConfirmed ? '✓ Confirmed' : 'Confirm'}
+					</button>
+				</div>
+			</div>
+		</div>
+	)
+}
+
+
 // providers
 
 const ProviderSetting = ({ providerName, settingName, subTextMd }: { providerName: ProviderName, settingName: SettingName, subTextMd: React.ReactNode }) => {
@@ -634,6 +731,7 @@ const ProviderSetting = ({ providerName, settingName, subTextMd }: { providerNam
 			<VoidSimpleInputBox
 				value={settingValue}
 				onChangeValue={handleChangeValue}
+				onBlur={(e) => { handleChangeValue((e.target as HTMLInputElement).value) }}
 				placeholder={`${settingTitle} (${placeholder})`}
 				passwordBlur={isPasswordField}
 				compact={true}
@@ -1296,6 +1394,75 @@ export const Settings = () => {
 
 
 
+										{/* Function Map Analysis */}
+										<ErrorBoundary>
+											<div>
+												<h4 className={`text-base`}>Function Map Analysis</h4>
+												<div className="text-sm text-void-fg-3 mt-1">功能地图 AI 分析档位、跨分支依赖显示与架构保护。</div>
+												<div className="my-3 space-y-3">
+													<div>
+														<span className="text-xs text-void-fg-3">默认分析档位</span>
+														<select
+															className="mt-1 block text-xs bg-void-bg-1 border border-void-border rounded px-2 py-1"
+															value={settingsState.globalSettings.functionMapAnalysisProfile}
+															onChange={e => voidSettingsService.setGlobalSetting('functionMapAnalysisProfile', e.target.value as 'quick' | 'standard' | 'deep')}
+														>
+															<option value="quick">快速</option>
+															<option value="standard">标准</option>
+															<option value="deep">深度</option>
+														</select>
+													</div>
+													<div>
+														<span className="text-xs text-void-fg-3">跨分支依赖边</span>
+														<select
+															className="mt-1 block text-xs bg-void-bg-1 border border-void-border rounded px-2 py-1"
+															value={settingsState.globalSettings.functionMapShowCrossBranchEdges}
+															onChange={e => voidSettingsService.setGlobalSetting('functionMapShowCrossBranchEdges', e.target.value as 'always' | 'on-select' | 'never')}
+														>
+															<option value="on-select">选中节点后显示</option>
+															<option value="always">始终显示</option>
+															<option value="never">不显示</option>
+														</select>
+													</div>
+													<div>
+														<span className="text-xs text-void-fg-3">Architecture Guard</span>
+														<select
+															className="mt-1 block text-xs bg-void-bg-1 border border-void-border rounded px-2 py-1"
+															value={settingsState.globalSettings.functionMapArchitectureGuard}
+															onChange={e => voidSettingsService.setGlobalSetting('functionMapArchitectureGuard', e.target.value as 'off' | 'warn' | 'block')}
+														>
+															<option value="warn">警告</option>
+															<option value="block">阻断危险修改</option>
+															<option value="off">关闭</option>
+														</select>
+													</div>
+													<label className="flex items-center gap-2 text-xs text-void-fg-2">
+														<input
+															type="checkbox"
+															checked={settingsState.globalSettings.functionMapLazyRefinement}
+															onChange={e => voidSettingsService.setGlobalSetting('functionMapLazyRefinement', e.target.checked)}
+														/>
+														展开节点时 lazy 细化子功能
+													</label>
+													<div>
+														<span className="text-xs text-void-fg-3">Token 预算（0 = unlimited）</span>
+														<input
+															type="number"
+															min={0}
+															className="mt-1 block text-xs bg-void-bg-1 border border-void-border rounded px-2 py-1 w-32"
+															value={settingsState.globalSettings.functionMapTokenBudget === 'unlimited' ? 0 : settingsState.globalSettings.functionMapTokenBudget}
+															onChange={e => {
+																const v = parseInt(e.target.value, 10);
+																voidSettingsService.setGlobalSetting('functionMapTokenBudget', v <= 0 ? 'unlimited' : v);
+															}}
+														/>
+													</div>
+													<ModelDropdown featureName="FunctionMap" className="text-xs text-void-fg-3 bg-void-bg-1 border border-void-border-1 rounded p-0.5 px-1" />
+													<FunctionMapChangelogExport />
+												</div>
+											</div>
+										</ErrorBoundary>
+
 										{/* Tools Section */}
 										<div>
 											<h4 className={`text-base`}>Tools</h4>
@@ -1558,6 +1725,7 @@ Use Model Context Protocol to provide Agent mode with more tools.
 					</div>
 				</main>
 			</div>
+			<ConfirmModelSettingsFooter className="fixed bottom-0 left-0 right-0 z-50" />
 		</div>
 	);
 }

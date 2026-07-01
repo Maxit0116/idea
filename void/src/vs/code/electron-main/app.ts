@@ -1257,7 +1257,7 @@ export class CodeApplication extends Disposable {
 		mainProcessElectronServer.registerChannel('void-channel-mcp', mcpChannel);
 
 		// Project OS analysis engine
-		const projectOsChannel = new ProjectOsChannel();
+		const projectOsChannel = new ProjectOsChannel(accessor.get(IMetricsService));
 		mainProcessElectronServer.registerChannel(PROJECT_OS_CHANNEL, projectOsChannel);
 
 		// Extension Host Debug Broadcasting

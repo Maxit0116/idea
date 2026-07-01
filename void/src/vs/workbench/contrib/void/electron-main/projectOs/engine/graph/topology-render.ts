@@ -53,6 +53,7 @@ export function renderTopologyMarkdown(
     lines.push('')
     lines.push('Edges:')
     for (const edge of graph.edges) {
+      if (edge.relation === 'imports') continue
       const src = nodeMap.get(edge.source)?.name ?? edge.source
       const tgt = nodeMap.get(edge.target)?.name ?? edge.target
       lines.push(`  ${src} --${edge.relation}--> ${tgt}`)

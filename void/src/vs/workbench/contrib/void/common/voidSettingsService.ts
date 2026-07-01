@@ -11,9 +11,9 @@ import { registerSingleton, InstantiationType } from '../../../../platform/insta
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IMetricsService } from './metricsService.js';
-import { defaultProviderSettings, getModelCapabilities, ModelOverrides } from './modelCapabilities.js';
+import { getModelCapabilities, ModelOverrides } from './modelCapabilities.js';
 import { VOID_SETTINGS_STORAGE_KEY } from './storageKeys.js';
-import { defaultSettingsOfProvider, FeatureName, ProviderName, ModelSelectionOfFeature, SettingsOfProvider, SettingName, providerNames, ModelSelection, modelSelectionsEqual, featureNames, VoidStatefulModelInfo, GlobalSettings, GlobalSettingName, defaultGlobalSettings, ModelSelectionOptions, OptionsOfModelSelection, ChatMode, OverridesOfModel, defaultOverridesOfModel, MCPUserStateOfName as MCPUserStateOfName, MCPUserState } from './voidSettingsTypes.js';
+import { defaultSettingsOfProvider, FeatureName, ProviderName, ModelSelectionOfFeature, SettingsOfProvider, SettingName, providerNames, ModelSelection, modelSelectionsEqual, featureNames, VoidStatefulModelInfo, GlobalSettings, GlobalSettingName, defaultGlobalSettings, ModelSelectionOptions, OptionsOfModelSelection, ChatMode, OverridesOfModel, defaultOverridesOfModel, MCPUserStateOfName as MCPUserStateOfName, MCPUserState, isProviderConfigured, isProviderReadyForModelOptions } from './voidSettingsTypes.js';
 
 
 // name is the name in the dropdown
@@ -75,6 +75,8 @@ export interface IVoidSettingsService {
 	toggleModelHidden(providerName: ProviderName, modelName: string): void;
 	addModel(providerName: ProviderName, modelName: string): void;
 	deleteModel(providerName: ProviderName, modelName: string): boolean;
+	/** Enable first model for ready providers and refresh Chat model selection. */
+	confirmProviderSetup(): void;
 
 	addMCPUserStateOfNames(userStateOfName: MCPUserStateOfName): Promise<void>;
 	removeMCPUserStateOfNames(serverNames: string[]): Promise<void>;
@@ -114,13 +116,14 @@ export const modelFilterOfFeatureName: {
 	} } = {
 	'Autocomplete': { filter: (o, opts) => getModelCapabilities(o.providerName, o.modelName, opts.overridesOfModel).supportsFIM, emptyMessage: { message: 'No models support FIM', priority: 'always' } },
 	'Chat': { filter: o => true, emptyMessage: null, },
+	'FunctionMap': { filter: o => true, emptyMessage: null, },
 	'Ctrl+K': { filter: o => true, emptyMessage: null, },
 	'Apply': { filter: o => true, emptyMessage: null, },
 	'SCM': { filter: o => true, emptyMessage: null, },
 }
 
 
-const _stateWithMergedDefaultModels = (state: VoidSettingsState): VoidSettingsState => {
+const _stateWithMergedDefaultModels = (state: Omit<VoidSettingsState, '_modelOptions'>): Omit<VoidSettingsState, '_modelOptions'> => {
 	let newSettingsOfProvider = state.settingsOfProvider
 
 	// recompute default models
@@ -143,6 +146,60 @@ const _stateWithMergedDefaultModels = (state: VoidSettingsState): VoidSettingsSt
 	}
 }
 
+const _chatSelectionIsUsable = (state: VoidSettingsState): boolean => {
+	const chat = state.modelSelectionOfFeature.Chat
+	if (!chat) return false
+	return state._modelOptions.some(o => modelSelectionsEqual(o.selection, chat))
+}
+
+const _applyModelSetup = (state: Omit<VoidSettingsState, '_modelOptions'>): VoidSettingsState => {
+	let next = _validatedModelState(_stateWithMergedDefaultModels(_unhideFirstModelsForReadyProviders(state)))
+
+	if (!_chatSelectionIsUsable(next) && next._modelOptions.length > 0) {
+		next = _validatedModelState({
+			...next,
+			modelSelectionOfFeature: {
+				...next.modelSelectionOfFeature,
+				Chat: next._modelOptions[0].selection,
+			},
+		})
+	}
+
+	return next
+}
+
+const _unhideFirstModelsForReadyProviders = (state: Omit<VoidSettingsState, '_modelOptions'>): Omit<VoidSettingsState, '_modelOptions'> => {
+	let newSettingsOfProvider = state.settingsOfProvider
+
+	for (const providerName of providerNames) {
+		const partialState = { ...state, settingsOfProvider: newSettingsOfProvider } as VoidSettingsState
+		if (!isProviderReadyForModelOptions(providerName, partialState)) {
+			continue
+		}
+
+		const provider = newSettingsOfProvider[providerName]
+		if (provider.models.filter(m => !m.isHidden).length > 0) {
+			continue
+		}
+		if (provider.models.length === 0) {
+			continue
+		}
+
+		newSettingsOfProvider = {
+			...newSettingsOfProvider,
+			[providerName]: {
+				...provider,
+				models: provider.models.map((m, i) => i === 0 ? { ...m, isHidden: false } : m),
+			},
+		}
+	}
+
+	return {
+		...state,
+		settingsOfProvider: newSettingsOfProvider,
+	}
+}
+
 const _validatedModelState = (state: Omit<VoidSettingsState, '_modelOptions'>): VoidSettingsState => {
 
 	let newSettingsOfProvider = state.settingsOfProvider
@@ -151,7 +208,8 @@ const _validatedModelState = (state: Omit<VoidSettingsState, '_modelOptions'>): 
 	for (const providerName of providerNames) {
 		const settingsAtProvider = newSettingsOfProvider[providerName]
 
-		const didFillInProviderSettings = Object.keys(defaultProviderSettings[providerName]).every(key => !!settingsAtProvider[key as keyof typeof settingsAtProvider])
+		const partialState = { ...state, settingsOfProvider: newSettingsOfProvider } as VoidSettingsState
+		const didFillInProviderSettings = isProviderConfigured(providerName, partialState)
 
 		if (didFillInProviderSettings === settingsAtProvider._didFillInProviderSettings) continue
 
@@ -168,7 +226,8 @@ const _validatedModelState = (state: Omit<VoidSettingsState, '_modelOptions'>): 
 	let newModelOptions: ModelOption[] = []
 	for (const providerName of providerNames) {
 		const providerTitle = providerName // displayInfoOfProviderName(providerName).title.toLowerCase() // looks better lowercase, best practice to not use raw providerName
-		if (!newSettingsOfProvider[providerName]._didFillInProviderSettings) continue // if disabled, don't display model options
+		const partialState = { ...state, settingsOfProvider: newSettingsOfProvider } as VoidSettingsState
+		if (!isProviderReadyForModelOptions(providerName, partialState)) continue
 		for (const { modelName, isHidden } of newSettingsOfProvider[providerName].models) {
 			if (isHidden) continue
 			newModelOptions.push({ name: `${modelName} (${providerTitle})`, selection: { providerName, modelName } })
@@ -214,9 +273,9 @@ const _validatedModelState = (state: Omit<VoidSettingsState, '_modelOptions'>): 
 const defaultState = () => {
 	const d: VoidSettingsState = {
 		settingsOfProvider: deepClone(defaultSettingsOfProvider),
-		modelSelectionOfFeature: { 'Chat': null, 'Ctrl+K': null, 'Autocomplete': null, 'Apply': null, 'SCM': null },
+		modelSelectionOfFeature: { 'Chat': null, 'Ctrl+K': null, 'Autocomplete': null, 'Apply': null, 'SCM': null, 'FunctionMap': null },
 		globalSettings: deepClone(defaultGlobalSettings),
-		optionsOfModelSelection: { 'Chat': {}, 'Ctrl+K': {}, 'Autocomplete': {}, 'Apply': {}, 'SCM': {} },
+		optionsOfModelSelection: { 'Chat': {}, 'Ctrl+K': {}, 'Autocomplete': {}, 'Apply': {}, 'SCM': {}, 'FunctionMap': {} },
 		overridesOfModel: deepClone(defaultOverridesOfModel),
 		_modelOptions: [], // computed later
 		mcpUserStateOfName: {},
@@ -234,6 +293,9 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 
 	state: VoidSettingsState;
 
+	private _stateEditVersion = 0;
+	private readonly _initEditVersionSnapshot: number;
+
 	private readonly _resolver: () => void
 	waitForInitState: Promise<void> // await this if you need a valid state initially
 
@@ -248,6 +310,7 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 
 		// at the start, we haven't read the partial config yet, but we need to set state to something
 		this.state = defaultState()
+		this._initEditVersionSnapshot = this._stateEditVersion
 		let resolver: () => void = () => { }
 		this.waitForInitState = new Promise((res, rej) => resolver = res)
 		this._resolver = resolver
@@ -255,13 +318,22 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 		this.readAndInitializeState()
 	}
 
+	private _markStateEdited(): void {
+		this._stateEditVersion++
+	}
+
+	private _finalizeState(state: Omit<VoidSettingsState, '_modelOptions'>): VoidSettingsState {
+		return _applyModelSetup(state)
+	}
+
 
 
 
 	dangerousSetState = async (newState: VoidSettingsState) => {
-		this.state = _validatedModelState(newState)
-		await this._storeState()
+		this._markStateEdited()
+		this.state = this._finalizeState(newState)
 		this._onDidChangeState.fire()
+		await this._storeState()
 		this._onUpdate_syncApplyToChat()
 		this._onUpdate_syncSCMToChat()
 	}
@@ -292,6 +364,19 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 			
 			// add autoAcceptLLMChanges feature
 			if (readS.globalSettings.autoAcceptLLMChanges === undefined) readS.globalSettings.autoAcceptLLMChanges = false;
+			if (readS.globalSettings.functionMapUseChatModel === undefined) readS.globalSettings.functionMapUseChatModel = true;
+			if (readS.globalSettings.functionMapAnalysisProfile === undefined) readS.globalSettings.functionMapAnalysisProfile = 'standard';
+			if (readS.globalSettings.functionMapTokenBudget === undefined) readS.globalSettings.functionMapTokenBudget = 'unlimited';
+			if (readS.globalSettings.functionMapLazyRefinement === undefined) readS.globalSettings.functionMapLazyRefinement = true;
+			if (readS.globalSettings.functionMapShowCrossBranchEdges === undefined) readS.globalSettings.functionMapShowCrossBranchEdges = 'on-select';
+			if (readS.globalSettings.functionMapArchitectureGuard === undefined) readS.globalSettings.functionMapArchitectureGuard = 'warn';
+			if (readS.globalSettings.functionMapMaxUnitNodesPerFeature === undefined) readS.globalSettings.functionMapMaxUnitNodesPerFeature = 20;
+			if (readS.modelSelectionOfFeature && readS.modelSelectionOfFeature['FunctionMap'] === undefined) {
+				readS.modelSelectionOfFeature['FunctionMap'] = null;
+			}
+			if (readS.optionsOfModelSelection && !readS.optionsOfModelSelection['FunctionMap']) {
+				readS.optionsOfModelSelection['FunctionMap'] = {};
+			}
 		}
 		catch (e) {
 			readS = defaultState()
@@ -336,10 +421,14 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 			readS = defaultState()
 		}
 
-		this.state = readS
-		this.state = _stateWithMergedDefaultModels(this.state)
-		this.state = _validatedModelState(this.state);
+		const initializedFromStorage = this._finalizeState(readS)
 
+		// Don't overwrite edits the user made while async init was loading from disk
+		if (this._stateEditVersion === this._initEditVersionSnapshot) {
+			this.state = initializedFromStorage
+		} else {
+			this.state = this._finalizeState(this.state)
+		}
 
 		this._resolver();
 		this._onDidChangeState.fire();
@@ -359,6 +448,23 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 	}
 
 
+	private _syncFeatureHooksIfNeeded(prevState: VoidSettingsState) {
+		const prevChat = prevState.modelSelectionOfFeature.Chat
+		const newChat = this.state.modelSelectionOfFeature.Chat
+		const chatChanged = prevChat === null || newChat === null
+			? prevChat !== newChat
+			: !modelSelectionsEqual(prevChat, newChat)
+		if (!chatChanged || !newChat) {
+			return
+		}
+		if (this.state.globalSettings.syncApplyToChat) {
+			this._onUpdate_syncApplyToChat()
+		}
+		if (this.state.globalSettings.syncSCMToChat) {
+			this._onUpdate_syncSCMToChat()
+		}
+	}
+
 	private async _storeState() {
 		const state = this.state
 		const encryptedState = await this._encryptionService.encrypt(JSON.stringify(state))
@@ -366,6 +472,7 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 	}
 
 	setSettingOfProvider: SetSettingOfProviderFn = async (providerName, settingName, newVal) => {
+		this._markStateEdited()
 
 		const newModelSelectionOfFeature = this.state.modelSelectionOfFeature
 
@@ -392,10 +499,16 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 			mcpUserStateOfName: newMCPUserStateOfName,
 		}
 
-		this.state = _validatedModelState(newState)
+		const prevState = this.state
+		const stateToValidate = (settingName === 'apiKey' || settingName === 'endpoint')
+			? _unhideFirstModelsForReadyProviders(newState)
+			: newState
 
-		await this._storeState()
+		this.state = this._finalizeState(stateToValidate)
+
+		this._syncFeatureHooksIfNeeded(prevState)
 		this._onDidChangeState.fire()
+		await this._storeState()
 
 	}
 
@@ -410,6 +523,7 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 	}
 
 	setGlobalSetting: SetGlobalSettingFn = async (settingName, newVal) => {
+		this._markStateEdited()
 		const newState: VoidSettingsState = {
 			...this.state,
 			globalSettings: {
@@ -417,9 +531,9 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 				[settingName]: newVal
 			}
 		}
-		this.state = _validatedModelState(newState)
-		await this._storeState()
+		this.state = _validatedModelState(_stateWithMergedDefaultModels(newState))
 		this._onDidChangeState.fire()
+		await this._storeState()
 
 		// hooks
 		if (this.state.globalSettings.syncApplyToChat) this._onUpdate_syncApplyToChat()
@@ -429,6 +543,7 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 
 
 	setModelSelectionOfFeature: SetModelSelectionOfFeatureFn = async (featureName, newVal) => {
+		this._markStateEdited()
 		const newState: VoidSettingsState = {
 			...this.state,
 			modelSelectionOfFeature: {
@@ -437,10 +552,10 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 			}
 		}
 
-		this.state = _validatedModelState(newState)
+		this.state = _validatedModelState(_stateWithMergedDefaultModels(newState))
 
-		await this._storeState()
 		this._onDidChangeState.fire()
+		await this._storeState()
 
 		// hooks
 		if (featureName === 'Chat') {
@@ -468,10 +583,10 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 				}
 			}
 		}
-		this.state = _validatedModelState(newState)
+		this.state = _validatedModelState(_stateWithMergedDefaultModels(newState))
 
-		await this._storeState()
 		this._onDidChangeState.fire()
+		await this._storeState()
 	}
 
 	setOverridesOfModel = async (providerName: ProviderName, modelName: string, overrides: Partial<ModelOverrides> | undefined) => {
@@ -489,9 +604,9 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 			}
 		};
 
-		this.state = _validatedModelState(newState);
-		await this._storeState();
+		this.state = _validatedModelState(_stateWithMergedDefaultModels(newState));
 		this._onDidChangeState.fire();
+		await this._storeState();
 
 		this._metricsService.capture('Update Model Overrides', { providerName, modelName, overrides });
 	}
@@ -516,8 +631,7 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 		}
 	}
 	toggleModelHidden(providerName: ProviderName, modelName: string) {
-
-
+		this._markStateEdited()
 		const { models } = this.state.settingsOfProvider[providerName]
 		const modelIdx = models.findIndex(m => m.modelName === modelName)
 		if (modelIdx === -1) return
@@ -527,11 +641,38 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 			{ ...models[modelIdx], isHidden: newIsHidden },
 			...models.slice(modelIdx + 1, Infinity)
 		]
-		this.setSettingOfProvider(providerName, 'models', newModels)
+
+		const newSettingsOfProvider: SettingsOfProvider = {
+			...this.state.settingsOfProvider,
+			[providerName]: {
+				...this.state.settingsOfProvider[providerName],
+				models: newModels,
+			},
+		}
+
+		const newState = {
+			...this.state,
+			settingsOfProvider: newSettingsOfProvider,
+		}
+
+		const prevState = this.state
+		this.state = this._finalizeState(newState)
+		this._syncFeatureHooksIfNeeded(prevState)
+		this._onDidChangeState.fire()
+		void this._storeState()
 
 		this._metricsService.capture('Toggle Model Hidden', { providerName, modelName, newIsHidden })
-
 	}
+
+	confirmProviderSetup(): void {
+		this._markStateEdited()
+		const prevState = this.state
+		this.state = this._finalizeState(this.state)
+		this._syncFeatureHooksIfNeeded(prevState)
+		this._onDidChangeState.fire()
+		void this._storeState()
+	}
+
 	addModel(providerName: ProviderName, modelName: string) {
 		const { models } = this.state.settingsOfProvider[providerName]
 		const existingIdx = models.findIndex(m => m.modelName === modelName)
@@ -569,9 +710,9 @@ class VoidSettingsService extends Disposable implements IVoidSettingsService {
 				...newStates
 			}
 		};
-		this.state = _validatedModelState(newState);
-		await this._storeState();
+		this.state = _validatedModelState(_stateWithMergedDefaultModels(newState));
 		this._onDidChangeState.fire();
+		await this._storeState();
 		this._metricsService.capture('Set MCP Server States', { newStates });
 	}
 

@@ -4,9 +4,10 @@
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
 
-import { defaultModelsOfProvider, defaultProviderSettings, ModelOverrides } from './modelCapabilities.js';
+import { defaultModelsOfProvider, defaultProviderSettings, getModelCapabilities, ModelOverrides } from './modelCapabilities.js';
 import { ToolApprovalType } from './toolsServiceTypes.js';
 import { VoidSettingsState } from './voidSettingsService.js'
+import type { AnalysisProfile, ArchitectureGuardMode, CrossBranchEdgeMode, TokenBudget } from './projectOsTypes.js'
 
 
 type UnionOfKeys<T> = T extends T ? keyof T : never;
@@ -362,7 +363,7 @@ export const modelSelectionsEqual = (m1: ModelSelection, m2: ModelSelection) => 
 }
 
 // this is a state
-export const featureNames = ['Chat', 'Ctrl+K', 'Autocomplete', 'Apply', 'SCM'] as const
+export const featureNames = ['Chat', 'Ctrl+K', 'Autocomplete', 'Apply', 'SCM', 'FunctionMap'] as const
 export type ModelSelectionOfFeature = Record<(typeof featureNames)[number], ModelSelection | null>
 export type FeatureName = keyof ModelSelectionOfFeature
 
@@ -380,6 +381,8 @@ export const displayInfoOfFeatureName = (featureName: FeatureName) => {
 	// source control:
 	else if (featureName === 'SCM')
 		return 'Commit Message Generator'
+	else if (featureName === 'FunctionMap')
+		return 'Function Map Analysis'
 	else
 		throw new Error(`Feature Name ${featureName} not allowed`)
 }
@@ -396,34 +399,91 @@ export const hasDownloadButtonsOnModelsProviderNames = ['ollama'] as const satis
 
 
 
+/** True when all user-required provider fields are filled (factory defaults count as satisfied). */
+export const isProviderConfigured = (providerName: ProviderName, settingsState: VoidSettingsState): boolean => {
+	const settingsAtProvider = settingsState.settingsOfProvider[providerName]
+	const defaults = defaultProviderSettings[providerName]
+	return Object.entries(defaults).every(([key, defaultVal]) => {
+		// Non-empty factory defaults (endpoint, region, headersJSON, etc.) are already satisfied.
+		if (typeof defaultVal === 'string' && defaultVal.length > 0) {
+			return true
+		}
+		const raw = settingsAtProvider[key as keyof typeof settingsAtProvider]
+		const currentVal = typeof raw === 'string' ? raw : ''
+		return currentVal.length > 0
+	})
+}
+
+/** True when the user has entered at least one credential (API key or endpoint). */
+export const hasProviderCredentials = (providerName: ProviderName, settingsState: VoidSettingsState): boolean => {
+	const settingsAtProvider = settingsState.settingsOfProvider[providerName]
+	const apiKey = typeof settingsAtProvider.apiKey === 'string' ? settingsAtProvider.apiKey : ''
+	if (apiKey.length > 0) {
+		return true
+	}
+	const endpoint = typeof settingsAtProvider.endpoint === 'string' ? settingsAtProvider.endpoint : ''
+	if (endpoint.length > 0) {
+		return true
+	}
+	return isProviderConfigured(providerName, settingsState)
+}
+
+/** Provider is ready to show models in dropdowns (credentials entered, may still need extra fields for API calls). */
+export const isProviderReadyForModelOptions = (providerName: ProviderName, settingsState: VoidSettingsState): boolean => {
+	return isProviderConfigured(providerName, settingsState) || hasProviderCredentials(providerName, settingsState)
+}
+
 // use this in isFeatuerNameDissbled
 export const isProviderNameDisabled = (providerName: ProviderName, settingsState: VoidSettingsState) => {
 
 	const settingsAtProvider = settingsState.settingsOfProvider[providerName]
 	const isAutodetected = (refreshableProviderNames as string[]).includes(providerName)
 
-	const isDisabled = settingsAtProvider.models.length === 0
-	if (isDisabled) {
-		return isAutodetected ? 'providerNotAutoDetected' : (!settingsAtProvider._didFillInProviderSettings ? 'notFilledIn' : 'addModel')
+	if (!isProviderReadyForModelOptions(providerName, settingsState)) {
+		return isAutodetected ? 'providerNotAutoDetected' : 'notFilledIn'
 	}
+
+	const visibleModels = settingsAtProvider.models.filter(m => !m.isHidden)
+	if (visibleModels.length === 0) {
+		if (settingsAtProvider.models.length === 0) {
+			return isAutodetected ? 'providerNotAutoDetected' : 'addModel'
+		}
+		return 'needToEnableModel'
+	}
+
 	return false
 }
 
 export const isFeatureNameDisabled = (featureName: FeatureName, settingsState: VoidSettingsState) => {
-	// if has a selected provider, check if it's enabled
-	const selectedProvider = settingsState.modelSelectionOfFeature[featureName]
+	// Any model in the dropdown means this feature can run
+	const hasAvailableModel = settingsState._modelOptions.some(o => {
+		if (featureName === 'Autocomplete') {
+			return getModelCapabilities(o.selection.providerName, o.selection.modelName, settingsState.overridesOfModel).supportsFIM
+		}
+		return true
+	})
+	if (hasAvailableModel) {
+		return false
+	}
 
+	const selectedProvider = settingsState.modelSelectionOfFeature[featureName]
 	if (selectedProvider) {
-		const { providerName } = selectedProvider
-		return isProviderNameDisabled(providerName, settingsState)
+		const providerDisabled = isProviderNameDisabled(selectedProvider.providerName, settingsState)
+		if (providerDisabled === false) {
+			return false
+		}
 	}
 
 	// if there are any models they can turn on, tell them that
 	const canTurnOnAModel = !!providerNames.find(providerName => settingsState.settingsOfProvider[providerName].models.filter(m => m.isHidden).length !== 0)
 	if (canTurnOnAModel) return 'needToEnableModel'
 
+	// provider has credentials but no enabled models in dropdown yet
+	const anyReady = !!providerNames.find(providerName => isProviderReadyForModelOptions(providerName, settingsState))
+	if (anyReady) return 'needToEnableModel'
+
 	// if there are any providers filled in, then they just need to add a model
-	const anyFilledIn = !!providerNames.find(providerName => settingsState.settingsOfProvider[providerName]._didFillInProviderSettings)
+	const anyFilledIn = !!providerNames.find(providerName => isProviderConfigured(providerName, settingsState))
 	if (anyFilledIn) return 'addModel'
 
 	return 'addProvider'
@@ -452,6 +512,15 @@ export type GlobalSettings = {
 	isOnboardingComplete: boolean;
 	disableSystemMessage: boolean;
 	autoAcceptLLMChanges: boolean;
+	/** When true, architecture analysis uses the same model as Chat */
+	functionMapUseChatModel: boolean;
+	/** Default analysis profile (user still prompted before each analyze) */
+	functionMapAnalysisProfile: AnalysisProfile;
+	functionMapTokenBudget: TokenBudget;
+	functionMapLazyRefinement: boolean;
+	functionMapShowCrossBranchEdges: CrossBranchEdgeMode;
+	functionMapArchitectureGuard: ArchitectureGuardMode;
+	functionMapMaxUnitNodesPerFeature: number;
 }
 
 export const defaultGlobalSettings: GlobalSettings = {
@@ -468,6 +537,13 @@ export const defaultGlobalSettings: GlobalSettings = {
 	isOnboardingComplete: false,
 	disableSystemMessage: false,
 	autoAcceptLLMChanges: false,
+	functionMapUseChatModel: true,
+	functionMapAnalysisProfile: 'standard',
+	functionMapTokenBudget: 'unlimited',
+	functionMapLazyRefinement: false,
+	functionMapShowCrossBranchEdges: 'on-select',
+	functionMapArchitectureGuard: 'warn',
+	functionMapMaxUnitNodesPerFeature: 20,
 }
 
 export type GlobalSettingName = keyof GlobalSettings

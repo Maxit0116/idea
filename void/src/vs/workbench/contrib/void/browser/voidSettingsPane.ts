@@ -193,6 +193,23 @@ registerAction2(class extends Action2 {
 	}
 })
 
+export const VOID_CLOSE_SETTINGS_ACTION_ID = 'workbench.action.closeVoidSettings'
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: VOID_CLOSE_SETTINGS_ACTION_ID,
+			title: nls.localize2('voidCloseSettingsAction', "Void: Close Settings"),
+		});
+	}
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const editorService = accessor.get(IEditorService);
+		const openEditors = editorService.findEditors(VoidSettingsInput.RESOURCE);
+		if (openEditors.length > 0) {
+			await editorService.closeEditors(openEditors);
+		}
+	}
+})
+
 
 
 

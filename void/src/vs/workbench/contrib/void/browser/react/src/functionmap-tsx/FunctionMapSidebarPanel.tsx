@@ -11,16 +11,22 @@ import ErrorBoundary from '../sidebar-tsx/ErrorBoundary.js';
 import { useAccessor, useIsDark } from '../util/services.js';
 import {
 	NodeInspectorBody,
-	ProgressView,
+	ProjectInspectorBody,
+	AnalysisLoadingOverlay,
+	StaleGraphBanner,
 } from './functionMapParts.js';
+import { AnalysisProfileDialog } from './AnalysisProfileDialog.js';
+import { useAnalyzeWithDialog } from './useAnalyzeWithDialog.js';
 
 export interface FunctionMapSidebarPanelProps {
 	containerWidth?: number;
 	containerHeight?: number;
 }
 
+const SYS_ROOT_ID = 'sys_root';
+
 function ProjectOverview({ graph, onAnalyze }: { graph: GraphResponse; onAnalyze: () => void }) {
-	const featureNodes = graph.nodes.filter(n => n.id !== 'sys_root');
+	const featureNodes = graph.nodes.filter(n => n.id !== SYS_ROOT_ID);
 	return (
 		<div className="p-4 space-y-4">
 			<div>
@@ -39,7 +45,7 @@ function ProjectOverview({ graph, onAnalyze }: { graph: GraphResponse; onAnalyze
 				</div>
 			</div>
 			<p className="text-void-fg-3 text-xs leading-relaxed">
-				点击主编辑区中的节点，此处将显示模块详情、关联文件与上下游关系。
+				点击中心<strong className="text-void-fg-2">项目根节点</strong>或任意功能模块，右侧 AI Chat 将自动加载对应 context。
 			</p>
 			<button
 				onClick={onAnalyze}
@@ -71,34 +77,86 @@ function FunctionMapSidebarPanel({ containerWidth, containerHeight }: FunctionMa
 
 	const graph = analysisState.status === 'ready' ? analysisState.graph : null;
 	const detail = selection.detail;
+	const projectDetail = selection.projectDetail;
+	const isProjectLevel = selection.level === 'project' && projectDetail;
 
-	const handleAnalyze = useCallback(async () => {
+	const {
+		dialogOpen,
+		hasLlm,
+		defaultProfile,
+		openAnalyzeDialog,
+		confirmDialog,
+		cancelDialog,
+	} = useAnalyzeWithDialog();
+
+	const handleAnalyze = useCallback(() => {
 		const folders = workspaceService.getWorkspace().folders;
 		if (folders.length === 0) {
 			return;
 		}
-		await projectOsService.analyze(folders[0].uri.fsPath);
-	}, [projectOsService, workspaceService]);
+		openAnalyzeDialog(folders[0].uri.fsPath);
+	}, [openAnalyzeDialog, workspaceService]);
 
-	const handleOpenFile = useCallback((filePath: string) => {
+	const handleRefine = useCallback(async () => {
+		if (!graph || !detail) {
+			return;
+		}
+		const result = await projectOsService.refineNode(graph.projectId, detail.id);
+		if (result.suggestions.length > 0) {
+			const first = result.suggestions[0]!;
+			await projectOsService.applyGraphEdit(graph.projectId, first.patch);
+			await projectOsService.selectNode(graph.projectId, detail.id);
+		}
+	}, [graph, detail, projectOsService]);
+
+	const handleRename = useCallback(async (name: string) => {
+		if (!graph || !detail) {
+			return;
+		}
+		await projectOsService.applyGraphEdit(graph.projectId, { type: 'rename', nodeId: detail.id, name });
+		await projectOsService.selectNode(graph.projectId, detail.id);
+	}, [graph, detail, projectOsService]);
+
+	const handleSelectNode = useCallback(async (targetNodeId: string) => {
+		if (!graph) {
+			return;
+		}
+		await projectOsService.selectNode(graph.projectId, targetNodeId);
+	}, [graph, projectOsService]);
+
+	const handleOpenFile = useCallback((filePath: string, line?: number) => {
 		if (!graph) {
 			return;
 		}
 		const absPath = graph.projectPath + '/' + filePath.replace(/^\//, '');
-		commandService.executeCommand('vscode.open', URI.file(absPath));
+		const options = line ? { selection: { startLineNumber: line, startColumn: 1, endLineNumber: line, endColumn: 1 } } : undefined;
+		commandService.executeCommand('vscode.open', URI.file(absPath), options);
 	}, [graph, commandService]);
 
 	const height = containerHeight && containerHeight > 0 ? containerHeight : '100%';
 	const width = containerWidth && containerWidth > 0 ? containerWidth : '100%';
 
+	const headerTitle = isProjectLevel
+		? '项目'
+		: detail
+			? '功能节点'
+			: '架构信息';
+
 	return (
 		<ErrorBoundary>
+			<AnalysisProfileDialog
+				open={dialogOpen}
+				hasLlm={hasLlm}
+				defaultProfile={defaultProfile}
+				onConfirm={confirmDialog}
+				onCancel={cancelDialog}
+			/>
 			<div
 				className={`@@void-scope ${isDark ? 'dark' : ''} flex flex-col bg-void-bg-1 text-void-fg-1 overflow-hidden`}
 				style={{ width, height }}
 			>
 				<div className="px-3 py-2 border-b border-void-border flex-shrink-0">
-					<div className="text-xs font-semibold text-void-fg-2 uppercase tracking-wider">架构信息</div>
+					<div className="text-xs font-semibold text-void-fg-2 uppercase tracking-wider">{headerTitle}</div>
 					<div className="text-[10px] text-void-fg-3 mt-0.5 capitalize">{analysisState.status}</div>
 				</div>
 				<div className="flex-1 overflow-y-auto min-h-0">
@@ -111,7 +169,7 @@ function FunctionMapSidebarPanel({ containerWidth, containerHeight }: FunctionMa
 						</div>
 					)}
 					{analysisState.status === 'analyzing' && (
-						<ProgressView progress={analysisState.progress} />
+						<AnalysisLoadingOverlay progress={analysisState.progress} fullscreen={false} />
 					)}
 					{analysisState.status === 'error' && (
 						<div className="p-4 text-center space-y-2">
@@ -119,7 +177,29 @@ function FunctionMapSidebarPanel({ containerWidth, containerHeight }: FunctionMa
 							<button onClick={handleAnalyze} className="text-xs text-void-fg-3 underline">重试</button>
 						</div>
 					)}
-					{analysisState.status === 'ready' && graph && detail && (
+					{analysisState.status === 'ready' && graph && (
+						<div className="px-3 pt-3">
+							<StaleGraphBanner graph={graph} onReanalyze={handleAnalyze} />
+						</div>
+					)}
+					{analysisState.status === 'ready' && graph && isProjectLevel && (
+						<div className="flex flex-col h-full">
+							<div className="flex items-start justify-between p-4 border-b border-void-border">
+								<div className="min-w-0 flex-1">
+									<div className="text-void-fg-1 font-semibold text-sm truncate">{projectDetail!.projectName}</div>
+									<div className="text-void-fg-3 text-xs mt-0.5">项目根节点 · 全项目 context</div>
+								</div>
+								<button
+									onClick={() => projectOsService.clearSelection()}
+									className="text-void-fg-3 hover:text-void-fg-1 ml-2 flex-shrink-0 text-lg leading-none"
+								>
+									×
+								</button>
+							</div>
+							<ProjectInspectorBody detail={projectDetail!} onAnalyze={handleAnalyze} />
+						</div>
+					)}
+					{analysisState.status === 'ready' && graph && detail && !isProjectLevel && (
 						<div className="flex flex-col h-full">
 							<div className="flex items-start justify-between p-4 border-b border-void-border">
 								<div className="min-w-0 flex-1">
@@ -133,10 +213,17 @@ function FunctionMapSidebarPanel({ containerWidth, containerHeight }: FunctionMa
 									×
 								</button>
 							</div>
-							<NodeInspectorBody detail={detail} onOpenFile={handleOpenFile} />
+							<NodeInspectorBody
+								detail={detail}
+								onOpenFile={handleOpenFile}
+								onSelectNode={handleSelectNode}
+								projectId={graph.projectId}
+								onRefine={handleRefine}
+								onRename={handleRename}
+							/>
 						</div>
 					)}
-					{analysisState.status === 'ready' && graph && !detail && (
+					{analysisState.status === 'ready' && graph && !detail && !isProjectLevel && (
 						<ProjectOverview graph={graph} onAnalyze={handleAnalyze} />
 					)}
 				</div>

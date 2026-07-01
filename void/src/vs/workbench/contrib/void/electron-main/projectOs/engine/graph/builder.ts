@@ -7,17 +7,30 @@ import {
   detectRoutes,
   parseImports,
   extractExports,
+  detectProjectType,
 } from '../analyzer/index.js'
 import { clusterFiles } from './clustering.js'
 import { inferEdges } from './edge-inference.js'
 import { enrichTopology, computeTopologyMeta } from './topology-hierarchy.js'
+import { expandSubmoduleNodes } from './submodule-expansion.js'
 import type {
   ProjectGraph,
-  ProjectType,
   AnalysisProgress,
   AnalysisStage,
   FileEntry,
+  ProjectOsAnalyzeLlmConfig,
+  AnalysisOptions,
+  FunctionalNode,
+  AnalysisMeta,
 } from '../../../../common/projectOsTypes.js'
+import { DEFAULT_ANALYSIS_OPTIONS } from '../../../../common/projectOsTypes.js'
+import { isStaleFunctionMapGraph } from '../../../../common/projectOsTypes.js'
+import type { IMetricsService } from '../../../../common/metricsService.js'
+import { enrichArchitectureWithLlm } from '../llm/llm-architecture-enricher.js'
+import { buildAiFunctionTree } from './ai-function-tree.js'
+import { migrateGraph } from './graph-migrate.js'
+import { mergeGraphNodes } from './graph-merge.js'
+import { appendChangelog } from './graph-changelog.js'
 
 // ── Types ───────────────────────────────────────────────────────
 
@@ -27,36 +40,6 @@ interface AnalysisCallbacks {
   onError: (error: Error) => void
 }
 
-// ── Project Type Detection ──────────────────────────────────────
-
-async function detectProjectType(
-  projectPath: string,
-  dependencies: Record<string, string>,
-): Promise<ProjectType> {
-  if (!dependencies['next']) {
-    // Default to nextjs-app even without next dep (for analysis purposes)
-    return 'nextjs-app'
-  }
-
-  // Check for App Router (app/ directory)
-  try {
-    const stat = await fs.stat(path.join(projectPath, 'app'))
-    if (stat.isDirectory()) return 'nextjs-app'
-  } catch {
-    // Not found
-  }
-
-  // Check for Pages Router (pages/ directory)
-  try {
-    const stat = await fs.stat(path.join(projectPath, 'pages'))
-    if (stat.isDirectory()) return 'nextjs-pages'
-  } catch {
-    // Not found
-  }
-
-  return 'nextjs-app'
-}
-
 // ── File Index Builder ──────────────────────────────────────────
 
 function buildFileIndex(
@@ -64,7 +47,6 @@ function buildFileIndex(
   files: Awaited<ReturnType<typeof scanFiles>>,
   dependencies: Awaited<ReturnType<typeof parseImports>>,
 ): FileEntry[] {
-  // Build a map of node memberships per file
   const fileNodeMap = new Map<string, string[]>()
   for (const node of graph.nodes) {
     for (const linkedFile of node.linkedFiles) {
@@ -72,9 +54,15 @@ function buildFileIndex(
       existing.push(node.id)
       fileNodeMap.set(linkedFile.path, existing)
     }
+    for (const anchor of node.anchors ?? []) {
+      const existing = fileNodeMap.get(anchor.path) ?? []
+      if (!existing.includes(node.id)) {
+        existing.push(node.id)
+      }
+      fileNodeMap.set(anchor.path, existing)
+    }
   }
 
-  // Build import/export maps
   const importMap = new Map<string, string[]>()
   for (const dep of dependencies) {
     const existing = importMap.get(dep.source) ?? []
@@ -98,7 +86,7 @@ function buildFileIndex(
   })
 }
 
-// ── Load Existing Graph ─────────────────────────────────────────
+// ── Load / Save Graph ───────────────────────────────────────────
 
 async function loadExistingGraph(
   projectPath: string,
@@ -106,13 +94,11 @@ async function loadExistingGraph(
   const graphPath = path.join(projectPath, '.projectos', 'graph.json')
   try {
     const raw = await fs.readFile(graphPath, 'utf-8')
-    return JSON.parse(raw) as ProjectGraph
+    return migrateGraph(JSON.parse(raw) as ProjectGraph)
   } catch {
     return null
   }
 }
-
-// ── Save Graph ──────────────────────────────────────────────────
 
 async function saveGraph(
   projectPath: string,
@@ -124,8 +110,6 @@ async function saveGraph(
   await fs.writeFile(graphPath, JSON.stringify(graph, null, 2), 'utf-8')
 }
 
-// ── Progress Helper ─────────────────────────────────────────────
-
 function emitProgress(
   callbacks: AnalysisCallbacks,
   jobId: string,
@@ -136,73 +120,194 @@ function emitProgress(
   callbacks.onProgress({ jobId, stage, percent, message })
 }
 
+function useAiTree(profile: AnalysisOptions['profile'], llm?: ProjectOsAnalyzeLlmConfig): boolean {
+  return !!llm && (profile === 'standard' || profile === 'deep')
+}
+
 // ── Main Analysis Pipeline ──────────────────────────────────────
 
 export async function analyzeProject(
   projectPath: string,
   jobId: string,
   callbacks: AnalysisCallbacks,
+  options?: {
+    llm?: ProjectOsAnalyzeLlmConfig
+    metricsService?: IMetricsService
+    analysisOptions?: AnalysisOptions
+  },
 ): Promise<void> {
+  const analysisOptions: AnalysisOptions = {
+    ...DEFAULT_ANALYSIS_OPTIONS,
+    ...options?.analysisOptions,
+  }
+
   try {
-    // Stage 1: File scan
     emitProgress(callbacks, jobId, 'file_scan', 5, '扫描项目文件...')
     const files = await scanFiles(projectPath)
     emitProgress(callbacks, jobId, 'file_scan', 15, `发现 ${files.length} 个文件`)
 
-    // Read package.json
     const pkg = await readPackageJson(projectPath)
     const allDeps = {
       ...(pkg?.dependencies ?? {}),
       ...(pkg?.devDependencies ?? {}),
     }
 
-    // Detect project type
-    const projectType = await detectProjectType(projectPath, allDeps)
+    const projectType = await detectProjectType(projectPath, pkg, files)
+    emitProgress(callbacks, jobId, 'route_detection', 20, `项目类型: ${projectType}`)
 
-    // Stage 2: Route detection
-    emitProgress(callbacks, jobId, 'route_detection', 25, '检测路由结构...')
-    const routes = detectRoutes(files, projectType)
+    emitProgress(callbacks, jobId, 'route_detection', 25, '检测路由与模块结构...')
+    const routes = (projectType === 'nextjs-app' || projectType === 'nextjs-pages')
+      ? detectRoutes(files, projectType)
+      : []
 
-    // Stage 3: Import analysis
     emitProgress(callbacks, jobId, 'import_analysis', 40, '分析模块依赖...')
     const dependencies = await parseImports(files, projectPath)
 
-    // Stage 4: Clustering
     emitProgress(callbacks, jobId, 'clustering', 55, '聚类功能模块...')
-    const nodes = clusterFiles({
+    const staticNodes = await clusterFiles({
+      projectPath,
+      projectType,
       files,
       routes,
       dependencies,
       packageDeps: allDeps,
+      packageJson: pkg,
     })
 
-    // Stage 5: Edge inference
-    emitProgress(callbacks, jobId, 'edge_inference', 75, '推断模块关系...')
-    const edges = inferEdges(nodes, dependencies, routes)
+    if (staticNodes.length === 0) {
+      throw new Error('未能从项目中识别出可可视化的模块结构，请确认已打开包含源代码的项目文件夹。')
+    }
 
-    // Stage 5b: Stello-style topology enrichment (root + hierarchy + refs)
+    const projectName = pkg?.name ?? path.basename(projectPath)
+    let nodes: FunctionalNode[] = staticNodes
+    let edges = inferEdges(staticNodes, dependencies, routes)
+
+    const aiTree = useAiTree(analysisOptions.profile, options?.llm)
+    let aiTreeSucceeded = false
+    let usedStaticFallback = false
+    let analysisMeta: AnalysisMeta | undefined
+    let analysisError: string | null = null
+
+    if (aiTree && options?.llm && options.metricsService) {
+      emitProgress(callbacks, jobId, 'entry_discovery', 60, '发现产品入口...')
+      try {
+        const aiResult = await buildAiFunctionTree({
+          projectPath,
+          projectName,
+          projectType,
+          profile: analysisOptions.profile,
+          files,
+          routes,
+          staticNodes,
+          packageJson: pkg,
+          llm: options.llm,
+          metricsService: options.metricsService,
+          options: analysisOptions,
+          onStage: (stage, message) => {
+            emitProgress(callbacks, jobId, stage, stage === 'entry_discovery' ? 62 : stage === 'ai_pass1' ? 68 : 74, message)
+          },
+        })
+        nodes = aiResult.nodes
+        edges = aiResult.edges
+        aiTreeSucceeded = true
+        analysisMeta = {
+          profile: analysisOptions.profile,
+          pipeline: aiResult.pipeline,
+          entryCount: aiResult.entryCount,
+        }
+        emitProgress(callbacks, jobId, 'ai_pass1', 75, 'AI 功能树构建完成')
+      } catch (aiErr) {
+        const msg = aiErr instanceof Error ? aiErr.message : String(aiErr)
+        usedStaticFallback = true
+        analysisError = `AI 功能树失败: ${msg}`
+        emitProgress(callbacks, jobId, 'ai_function_tree', 75, analysisError)
+        // standard/deep: do NOT fall back to enrichArchitectureWithLlm — it keeps mod_* ids (directory mirror)
+        nodes = staticNodes
+        edges = inferEdges(staticNodes, dependencies, routes)
+      }
+    } else if (options?.llm && options.metricsService) {
+      emitProgress(callbacks, jobId, 'llm_enrichment', 82, 'AI 理解项目架构（语义命名与关系）...')
+      try {
+        const llmResult = await Promise.race([
+          enrichArchitectureWithLlm({
+            projectName,
+            projectType,
+            nodes: staticNodes,
+            edges,
+            llm: options.llm,
+            metricsService: options.metricsService,
+          }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('AI 分析超时，已使用静态分析结果')), 45_000),
+          ),
+        ])
+        nodes = llmResult.nodes
+        edges = llmResult.edges
+        emitProgress(callbacks, jobId, 'llm_enrichment', 88, 'AI 架构分析完成')
+      } catch (llmErr) {
+        const msg = llmErr instanceof Error ? llmErr.message : String(llmErr)
+        emitProgress(callbacks, jobId, 'llm_enrichment', 88, `AI 分析跳过: ${msg}`)
+      }
+    }
+
+    emitProgress(callbacks, jobId, 'edge_inference', 76, '推断模块关系...')
+    if (!aiTreeSucceeded) {
+      edges = inferEdges(nodes, dependencies, routes)
+    }
+
+    emitProgress(callbacks, jobId, 'graph_merge', 82, '合并历史节点标识...')
+    const existing = await loadExistingGraph(projectPath)
+    const skipMerge = aiTreeSucceeded && existing !== null
+    const { nodes: mergedNodes, changelog: mergeChangelog } = skipMerge
+      ? { nodes, changelog: [] as Awaited<ReturnType<typeof mergeGraphNodes>>['changelog'] }
+      : mergeGraphNodes(existing, nodes)
+    nodes = mergedNodes
+
     emitProgress(callbacks, jobId, 'finalize', 85, '构建架构拓扑...')
-    const topologyNodes = enrichTopology(nodes, edges)
+    let topologyNodes = enrichTopology(
+      nodes.filter(n => n.id !== 'sys_root'),
+      edges,
+      projectName,
+      { preserveHierarchy: aiTreeSucceeded },
+    )
+
+    if (!aiTreeSucceeded && analysisOptions.profile === 'quick') {
+      topologyNodes = expandSubmoduleNodes(topologyNodes)
+    }
+
     const topology = computeTopologyMeta(topologyNodes)
 
-    // Stage 6: Finalize
     emitProgress(callbacks, jobId, 'finalize', 90, '构建文件索引...')
 
-    // Reuse existing projectId if available
-    const existing = await loadExistingGraph(projectPath)
     const projectId = existing?.projectId ?? projectOsUuid()
 
+    const staticImportEdges = inferEdges(staticNodes, dependencies, routes).filter(e => e.relation === 'imports')
+    const importEdges = aiTreeSucceeded
+      ? staticImportEdges
+      : edges.filter(e => e.relation === 'imports')
+    const displayEdges = edges.filter(e => e.relation !== 'imports')
+
+    const analysisStatus: ProjectGraph['analysisStatus'] =
+      aiTreeSucceeded ? 'complete'
+        : (usedStaticFallback || !options?.llm) ? 'partial'
+          : 'complete'
+
     const graphWithoutIndex = {
-      version: '0.2.0' as const,
+      version: '0.3.0' as const,
       projectId,
-      projectName: pkg?.name ?? path.basename(projectPath),
+      projectName,
       projectType,
       analyzedAt: new Date().toISOString(),
-      analysisStatus: 'complete' as const,
-      analysisError: null,
+      analysisStatus,
+      analysisError,
       topology,
       nodes: topologyNodes,
-      edges,
+      edges: displayEdges,
+      internalArchitecture: {
+        importEdges,
+        analyzedAt: new Date().toISOString(),
+      },
+      analysisMeta,
     }
 
     const fileIndex = buildFileIndex(graphWithoutIndex, files, dependencies)
@@ -212,8 +317,10 @@ export async function analyzeProject(
       fileIndex,
     }
 
-    // Save to .projectos/graph.json
     await saveGraph(projectPath, graph)
+    for (const entry of mergeChangelog) {
+      await appendChangelog(projectPath, entry)
+    }
 
     emitProgress(callbacks, jobId, 'finalize', 100, '分析完成')
     callbacks.onComplete(graph)

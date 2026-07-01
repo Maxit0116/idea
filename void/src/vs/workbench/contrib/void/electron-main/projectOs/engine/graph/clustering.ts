@@ -5,7 +5,10 @@ import type {
   RouteEntry,
   DependencyEntry,
   LinkedFile,
+  ProjectType,
 } from '../../../../common/projectOsTypes.js'
+import { clusterByDirectoryStructure } from './directory-clustering.js'
+import { computeImportClosure } from './import-closure.js'
 
 // ── Route Segment Name Mapping (Chinese) ────────────────────────
 
@@ -231,7 +234,9 @@ function clusterToNode(cluster: Cluster): FunctionalNode {
       path: fp,
       role: fp.includes('page.') || fp.includes('pages/')
         ? ('primary' as const)
-        : ('supporting' as const),
+        : fp.includes('/api/') || fp.includes('route.')
+          ? ('api' as const)
+          : ('supporting' as const),
     }),
   )
 
@@ -263,15 +268,18 @@ function clusterToNode(cluster: Cluster): FunctionalNode {
 
 // ── Public API ──────────────────────────────────────────────────
 
-export function clusterFiles(input: {
+export async function clusterFiles(input: {
+  projectPath: string
+  projectType: ProjectType
   files: ScannedFile[]
   routes: RouteEntry[]
   dependencies: DependencyEntry[]
   packageDeps: Record<string, string>
-}): FunctionalNode[] {
-  const { files, routes, dependencies, packageDeps } = input
+  packageJson: { workspaces?: string[] | { packages: string[] } } | null
+}): Promise<FunctionalNode[]> {
+  const { projectPath, projectType, files, routes, dependencies, packageDeps, packageJson } = input
 
-  // Step 1: Cluster by page routes
+  // Step 1: Cluster by page routes (Next.js)
   const clusters = clusterByRoutes(files, routes)
 
   // Step 2: Attach API route files to matching clusters
@@ -283,6 +291,29 @@ export function clusterFiles(input: {
   // Step 4: Attach supporting files via dependency edges
   attachSupportingFiles(clusters, dependencies)
 
-  // Convert clusters to FunctionalNode[]
-  return clusters.map(clusterToNode)
+  // Step 5: Expand each cluster with bounded import closure from anchors
+  for (const cluster of clusters) {
+    const anchors = Array.from(cluster.filePaths).filter(fp =>
+      fp.includes('page.') || fp.includes('/api/') || fp.includes('route.'),
+    )
+    const seedPaths = anchors.length > 0 ? anchors : Array.from(cluster.filePaths).slice(0, 3)
+    const closure = computeImportClosure(seedPaths, dependencies)
+    for (const item of closure) {
+      cluster.filePaths.add(item.path)
+    }
+  }
+
+  let nodes = clusters.map(clusterToNode)
+
+  // Fallback: directory-based clustering for non-Next.js / empty route graphs
+  if (nodes.length === 0) {
+    nodes = await clusterByDirectoryStructure({
+      projectPath,
+      projectType,
+      files,
+      packageJson,
+    })
+  }
+
+  return nodes
 }

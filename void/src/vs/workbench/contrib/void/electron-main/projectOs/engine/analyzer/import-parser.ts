@@ -22,18 +22,81 @@ const RESOLVE_EXTENSIONS = [
   '/index.ts', '/index.tsx', '/index.js', '/index.jsx',
 ]
 
-// ── Resolve Relative Import ──────────────────────────────────────
+// ── Tsconfig path aliases ────────────────────────────────────────
+
+type PathAliases = { prefix: string; target: string }[]
+
+async function loadTsconfigPaths(projectRoot: string): Promise<PathAliases> {
+  const candidates = [
+    path.join(projectRoot, 'tsconfig.json'),
+    path.join(projectRoot, 'src', 'tsconfig.json'),
+  ]
+
+  for (const tsconfigPath of candidates) {
+    try {
+      const raw = await fs.readFile(tsconfigPath, 'utf-8')
+      const json = JSON.parse(raw.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, ''))
+      const paths = json?.compilerOptions?.paths as Record<string, string[]> | undefined
+      const baseUrl = (json?.compilerOptions?.baseUrl as string | undefined) ?? '.'
+      if (!paths) continue
+
+      const aliases: PathAliases = []
+      for (const [alias, targets] of Object.entries(paths)) {
+        const prefix = alias.replace(/\*$/, '')
+        const target = (targets[0] ?? '').replace(/\*$/, '')
+        if (!target) continue
+        aliases.push({
+          prefix,
+          target: path.join(baseUrl, target).replace(/\\/g, '/'),
+        })
+      }
+      if (aliases.length > 0) {
+        return aliases
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+
+  return []
+}
+
+function resolveAlias(
+  specifier: string,
+  aliases: PathAliases,
+): string | null {
+  for (const { prefix, target } of aliases) {
+    if (specifier.startsWith(prefix)) {
+      return target + specifier.slice(prefix.length)
+    }
+  }
+  return null
+}
+
+// ── Resolve Import ───────────────────────────────────────────────
 
 async function resolveImport(
   specifier: string,
   sourceDir: string,
   projectRoot: string,
   knownPaths: Set<string>,
+  aliases: PathAliases,
 ): Promise<string | null> {
-  const basePath = path.resolve(sourceDir, specifier)
+  let resolvedSpecifier = specifier
+
+  if (!specifier.startsWith('.') && !specifier.startsWith('/')) {
+    const aliased = resolveAlias(specifier, aliases)
+    if (!aliased) {
+      return null
+    }
+    resolvedSpecifier = aliased
+  }
+
+  const basePath = path.isAbsolute(resolvedSpecifier)
+    ? path.join(projectRoot, resolvedSpecifier.replace(/^\//, ''))
+    : path.resolve(sourceDir, resolvedSpecifier)
   const relBase = path.relative(projectRoot, basePath)
 
-  // Check known file set first
   for (const ext of RESOLVE_EXTENSIONS) {
     const candidate = relBase + ext
     const normalized = candidate.replace(/\\/g, '/')
@@ -42,7 +105,6 @@ async function resolveImport(
     }
   }
 
-  // Fall back to filesystem check
   for (const ext of RESOLVE_EXTENSIONS) {
     const candidate = basePath + ext
     try {
@@ -65,8 +127,8 @@ export async function parseImports(
   projectRoot: string,
 ): Promise<DependencyEntry[]> {
   const dependencies: DependencyEntry[] = []
+  const aliases = await loadTsconfigPaths(projectRoot)
 
-  // Build a set of known relative paths for fast lookup
   const knownPaths = new Set<string>(
     files.map((f) => f.relativePath.replace(/\\/g, '/')),
   )
@@ -77,7 +139,6 @@ export async function parseImports(
     const sourceDir = path.dirname(file.absolutePath)
     const sourceRel = file.relativePath.replace(/\\/g, '/')
 
-    // Reset regex state
     IMPORT_REGEX.lastIndex = 0
     let match: RegExpExecArray | null
 
@@ -85,10 +146,6 @@ export async function parseImports(
       const specifier = match[1] ?? match[2] ?? match[3]
       if (!specifier) continue
 
-      // Only resolve relative imports
-      if (!specifier.startsWith('.') && !specifier.startsWith('/')) continue
-
-      // Determine import type
       let type: DependencyEntry['type'] = 'import'
       if (match[2] !== undefined) {
         type = 'dynamic_import'
@@ -96,7 +153,7 @@ export async function parseImports(
         type = 'require'
       }
 
-      const resolved = await resolveImport(specifier, sourceDir, projectRoot, knownPaths)
+      const resolved = await resolveImport(specifier, sourceDir, projectRoot, knownPaths, aliases)
       if (resolved) {
         dependencies.push({
           source: sourceRel,
@@ -113,7 +170,6 @@ export async function parseImports(
 export function extractExports(content: string): string[] {
   const exports: string[] = []
 
-  // Named exports
   NAMED_EXPORT_REGEX.lastIndex = 0
   let match: RegExpExecArray | null
   while ((match = NAMED_EXPORT_REGEX.exec(content)) !== null) {
@@ -122,7 +178,6 @@ export function extractExports(content: string): string[] {
     }
   }
 
-  // Default export
   if (DEFAULT_EXPORT_REGEX.test(content)) {
     exports.push('default')
   }

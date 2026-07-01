@@ -63,6 +63,8 @@ import './fileService.js'
 
 // Project OS — function map, analysis engine
 import './projectOsService.js'
+import './projectOsFileWatcher.js'
+import './functionMapChatBridge.js'
 import './functionMap.contribution.js'
 
 // register source control management

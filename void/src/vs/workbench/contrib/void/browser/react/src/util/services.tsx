@@ -52,7 +52,7 @@ import { ITerminalService } from '../../../../../terminal/browser/terminal.js'
 import { ISearchService } from '../../../../../../services/search/common/search.js'
 import { IExtensionManagementService } from '../../../../../../../platform/extensionManagement/common/extensionManagement.js'
 import { IMCPService } from '../../../../common/mcpService.js';
-import { IProjectOsService } from '../../../../common/projectOsTypes.js';
+import { IProjectOsService, ProjectOsChatContext, ProjectOsSelection } from '../../../../common/projectOsTypes.js';
 import { IStorageService, StorageScope } from '../../../../../../../platform/storage/common/storage.js'
 import { OPT_OUT_KEY } from '../../../../common/storageKeys.js'
 
@@ -84,6 +84,15 @@ const activeURIListeners: Set<(uri: URI | null) => void> = new Set();
 
 const mcpListeners: Set<() => void> = new Set()
 
+let projectOsChatContext: ProjectOsChatContext | null = null
+let projectOsSelection: ProjectOsSelection = {
+	nodeId: null,
+	level: 'none',
+	detail: null,
+	projectDetail: null,
+}
+const projectOsChatContextListeners: Set<() => void> = new Set()
+
 
 // must call this before you can use any of the hooks below
 // this should only be called ONCE! this is the only place you don't need to dispose onDidChange. If you use state.onDidChange anywhere else, make sure to dispose it!
@@ -102,9 +111,10 @@ export const _registerServices = (accessor: ServicesAccessor) => {
 		voidCommandBarService: accessor.get(IVoidCommandBarService),
 		modelService: accessor.get(IModelService),
 		mcpService: accessor.get(IMCPService),
+		projectOsService: accessor.get(IProjectOsService),
 	}
 
-	const { settingsStateService, chatThreadsStateService, refreshModelService, themeService, editCodeService, voidCommandBarService, modelService, mcpService } = stateServices
+	const { settingsStateService, chatThreadsStateService, refreshModelService, themeService, editCodeService, voidCommandBarService, modelService, mcpService, projectOsService } = stateServices
 
 
 
@@ -177,6 +187,18 @@ export const _registerServices = (accessor: ServicesAccessor) => {
 		})
 	)
 
+	projectOsChatContext = projectOsService.chatContext
+	projectOsSelection = projectOsService.selection
+	disposables.push(
+		projectOsService.onDidChangeChatContext(ctx => {
+			projectOsChatContext = ctx
+			projectOsChatContextListeners.forEach(l => l())
+		}),
+		projectOsService.onDidChangeSelection(sel => {
+			projectOsSelection = sel
+			projectOsChatContextListeners.forEach(l => l())
+		}),
+	)
 
 	return disposables
 }
@@ -287,6 +309,38 @@ export const useChatThreadsState = () => {
 	// 	}
 	// }
 	// return [s, ss] as const
+}
+
+/** Function Map node context for AI Chat banner — synced via service events, not only useEffect */
+export const useProjectOsChatContext = (): ProjectOsChatContext | null => {
+	const [, bump] = useState(0)
+	useEffect(() => {
+		const onProjectOsChange = () => bump(n => n + 1)
+		const onThreadChange = () => bump(n => n + 1)
+		projectOsChatContextListeners.add(onProjectOsChange)
+		chatThreadsStateListeners.add(onThreadChange)
+		return () => {
+			projectOsChatContextListeners.delete(onProjectOsChange)
+			chatThreadsStateListeners.delete(onThreadChange)
+		}
+	}, [])
+	if (projectOsChatContext) {
+		return projectOsChatContext
+	}
+	const binding = chatThreadsState.allThreads[chatThreadsState.currentThreadId]?.state?.functionMapBinding
+	if (!binding || projectOsSelection.level === 'none') {
+		return null
+	}
+	return {
+		level: binding.level,
+		label: binding.label,
+		nodeId: binding.nodeId,
+		markdown: '',
+		primaryFilePaths: [],
+		summary: projectOsSelection.detail?.summary
+			?? projectOsSelection.projectDetail?.projectName
+			?? undefined,
+	}
 }
 
 
